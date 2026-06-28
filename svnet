@@ -12,6 +12,7 @@ MIKROTIK="/opt/svobodanet/output/mikrotik"
 BACKUPS="/opt/svobodanet/backups"
 CLI="/usr/local/bin/svnet"
 REPO_DIR="${SVNET_REPO_DIR:-/opt/svobodanet/repo}"
+SVNET_GIT_URL="${SVNET_GIT_URL:-https://github.com/kadixLife/SVNET.git}"
 ADMIN_DIR="/opt/svobodanet-admin"
 
 OVPN_SERVICE="openvpn-server@svnet"
@@ -161,6 +162,7 @@ load_config() {
   MIKROTIK_OVPN_IF="${MIKROTIK_OVPN_IF:-ovpn-svnet}"
   MIKROTIK_LAN_DNS="${MIKROTIK_LAN_DNS:-192.168.50.1}"
   HTTP_PORT="${HTTP_PORT:-8088}"
+  SVNET_GIT_URL="${SVNET_GIT_URL:-https://github.com/kadixLife/SVNET.git}"
 }
 
 systemd_unit_exists() {
@@ -1627,6 +1629,94 @@ backup_menu() {
   done
 }
 
+doctor_git_repo() {
+  load_config
+  echo "### Git repository"
+
+  if [[ -d "$REPO_DIR" ]]; then
+    ok "Repo folder exists: $REPO_DIR"
+  else
+    warn "Repo folder not found: $REPO_DIR"
+    echo "Repair: sudo svnet --repair-git-repo"
+    echo
+    return 0
+  fi
+
+  if [[ -d "$REPO_DIR/.git" ]]; then
+    ok "Git metadata exists: $REPO_DIR/.git"
+  else
+    warn "Repo folder exists, but it is not a Git repository."
+    echo "Repair: sudo svnet --repair-git-repo"
+    echo
+    return 0
+  fi
+
+  if ! command_exists git; then
+    warn "git не найден. Команды обновления работать не будут."
+    echo "Repair after installing git: sudo svnet --repair-git-repo"
+    echo
+    return 0
+  fi
+
+  local remote
+  remote="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
+  if [[ -n "$remote" ]]; then
+    ok "git remote origin: $remote"
+  else
+    warn "git remote origin не настроен."
+    echo "Repair: sudo svnet --repair-git-repo"
+    echo
+    return 0
+  fi
+
+  if git -C "$REPO_DIR" fetch origin >/dev/null 2>&1; then
+    ok "git fetch origin: OK"
+  else
+    warn "git fetch origin не выполнен."
+  fi
+  echo
+}
+
+repair_git_repo() {
+  require_root || return 1
+  load_config
+
+  if ! command_exists git; then
+    fail "git не найден. Установите git и повторите repair."
+    echo "Пример: sudo apt install -y git"
+    return 1
+  fi
+
+  local ts backup
+  ts="$(date +%Y-%m-%d_%H-%M-%S)"
+  backup="${REPO_DIR}.nogit.backup_${ts}"
+
+  mkdir -p "$(dirname "$REPO_DIR")"
+
+  if [[ -e "$REPO_DIR" ]]; then
+    if [[ -e "$backup" ]]; then
+      backup="${backup}_$$"
+    fi
+    mv "$REPO_DIR" "$backup"
+    ok "Старый repo сохранён: $backup"
+  fi
+
+  git clone "$SVNET_GIT_URL" "$REPO_DIR" || {
+    fail "Не удалось клонировать $SVNET_GIT_URL в $REPO_DIR."
+    [[ -n "${backup:-}" ]] && warn "Старый repo сохранён здесь: $backup"
+    return 1
+  }
+
+  if [[ -f "$REPO_DIR/tests/bash-syntax.sh" ]]; then
+    bash "$REPO_DIR/tests/bash-syntax.sh" || return 1
+  else
+    bash -n "$REPO_DIR/svnet" || return 1
+  fi
+
+  ok "Git repo восстановлен: $REPO_DIR"
+  info "OpenVPN, firewall, MikroTik configs и пользовательские списки не менялись."
+}
+
 server_diagnostics() {
   load_config
   echo "Диагностика сервера"
@@ -1682,12 +1772,21 @@ server_diagnostics() {
 
   echo "### /opt/svobodanet structure"
   find "$BASE_DIR" -maxdepth 3 -printf '%M %s %p\n' 2>/dev/null | sort || true
+  echo
+
+  doctor_git_repo
 }
 
 resolve_update_repo() {
   load_config
   local script_dir git_root
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+  if [[ -d "$REPO_DIR" && ! -d "$REPO_DIR/.git" ]]; then
+    warn "Repo folder exists, but it is not a Git repository."
+    echo "Repair: sudo svnet --repair-git-repo"
+    return 1
+  fi
 
   if [[ -d "$REPO_DIR/.git" ]]; then
     printf '%s\n' "$REPO_DIR"
@@ -1731,6 +1830,11 @@ collect_update_info() {
 
   UPDATE_REPO="$(resolve_update_repo)" || {
     fail "Git-репозиторий СвободаNET не найден."
+    if [[ -d "$REPO_DIR" && ! -d "$REPO_DIR/.git" ]]; then
+      warn "Repo folder exists, but it is not a Git repository."
+      echo "Repair: sudo svnet --repair-git-repo"
+      echo
+    fi
     cat <<TEXT
 Проверьте один из вариантов:
 - /opt/svobodanet/repo должен быть Git-репозиторием
@@ -1994,6 +2098,7 @@ updates_menu() {
     menu_item "3" "Показать последние изменения" "Показать новые commits, если они есть."
     menu_item "4" "Dry-run обновления" "Показать будущие изменения без применения."
     menu_item "5" "Обновить сейчас" "Сделать backup и безопасно применить обновление."
+    menu_item "6" "Починить Git repo" "Пересоздать /opt/svobodanet/repo как Git-репозиторий."
     menu_item "0" "Назад" "Вернуться в главное меню."
     echo
     read -r -p "Выберите пункт: " choice || return 0
@@ -2003,6 +2108,7 @@ updates_menu() {
       3) show_update_changes; pause ;;
       4) update_dry_run; pause ;;
       5) update_svobodanet; pause ;;
+      6) repair_git_repo; pause ;;
       0) return 0 ;;
       *) warn "Неверный пункт."; sleep 1 ;;
     esac
@@ -2107,6 +2213,8 @@ Usage:
   svnet --publish-off  stop HTTP publish after MikroTik setup
   svnet --publish-status
                           show HTTP publish state and URLs
+  svnet --repair-git-repo
+                          rebuild /opt/svobodanet/repo as Git repository
   svnet --help         show this help
 TEXT
 }
@@ -2145,6 +2253,9 @@ main() {
       ;;
     --publish-status)
       publish_status
+      ;;
+    --repair-git-repo)
+      repair_git_repo
       ;;
     --help|-h)
       show_help

@@ -2,6 +2,7 @@
 
 SVNET_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SVNET_VERSION="$(tr -d '[:space:]' < "$SVNET_REPO_ROOT/VERSION")"
+SVNET_GIT_URL="${SVNET_GIT_URL:-https://github.com/kadixLife/SVNET.git}"
 
 if [[ -t 1 ]]; then
   RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'; RESET=$'\033[0m'
@@ -50,7 +51,7 @@ load_installed_config() {
 }
 
 mkdirs() {
-  mkdir -p "$CONFIG_DIR" "$LISTS_DIR" "$OUTPUT_DIR" "$CLIENTS_DIR" "$MIKROTIK_DIR" "$BACKUPS_DIR" "$REPO_DIR"
+  mkdir -p "$CONFIG_DIR" "$LISTS_DIR" "$OUTPUT_DIR" "$CLIENTS_DIR" "$MIKROTIK_DIR" "$BACKUPS_DIR"
 }
 
 escape_sed_value() {
@@ -82,6 +83,7 @@ CLIENTS_DIR="$CLIENTS_DIR"
 MIKROTIK_DIR="$MIKROTIK_DIR"
 BACKUPS_DIR="$BACKUPS_DIR"
 REPO_DIR="$REPO_DIR"
+SVNET_GIT_URL="$SVNET_GIT_URL"
 
 SERVER_IP="$SERVER_IP"
 WAN_IF="$WAN_IF"

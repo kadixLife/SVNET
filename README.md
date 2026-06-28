@@ -191,6 +191,15 @@ sudo svnet --update
 
 Если локальные изменения конфликтуют с GitHub или история разошлась, автоматическое обновление останавливается. Updater не делает destructive reinstall, не удаляет `/opt/svobodanet`, сертификаты, ключи, списки, UDP `1194`, firewall rules и рабочие MikroTik `.rsc`.
 
+Если `/opt/svobodanet/repo` существует, но это обычная папка без `.git`, обновления через Git работать не будут. Проверьте диагностику и восстановите repo:
+
+```bash
+sudo svnet --doctor
+sudo svnet --repair-git-repo
+```
+
+Repair переносит старую папку в `repo.nogit.backup_YYYY-MM-DD_HH-MM-SS`, заново клонирует `https://github.com/kadixLife/SVNET.git` в `/opt/svobodanet/repo` и проверяет bash-синтаксис. OpenVPN, firewall, MikroTik configs, пользовательские списки и output не меняются.
+
 Старый wrapper также доступен:
 
 ```bash

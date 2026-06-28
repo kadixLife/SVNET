@@ -2,7 +2,7 @@
 
 install_server_packages() {
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y openvpn easy-rsa iptables-persistent curl wget python3 rsync ca-certificates
+  DEBIAN_FRONTEND=noninteractive apt-get install -y git openvpn easy-rsa iptables-persistent curl wget python3 rsync ca-certificates
 }
 
 setup_easyrsa_and_openvpn() {
