@@ -450,12 +450,12 @@ status_openvpn() {
     ((problems++))
   fi
 
-  if command_exists ip && ip addr show "$OVPN_IF" >/dev/null 2>&1; then
-    if ip addr show "$OVPN_IF" 2>/dev/null | grep -q "$VPN_SERVER_IP"; then
+  if command_exists ip && ip -4 -o addr show dev "$OVPN_IF" >/dev/null 2>&1; then
+    if ip -4 -o addr show dev "$OVPN_IF" 2>/dev/null | grep -q " ${VPN_SERVER_IP}/"; then
       ok "$OVPN_IF: $VPN_SERVER_IP"
     else
       warn "$OVPN_IF найден, но IP $VPN_SERVER_IP не подтверждён"
-      ip addr show "$OVPN_IF" 2>/dev/null | sed -n '1,6p'
+      ip -4 -o addr show dev "$OVPN_IF" 2>/dev/null || true
     fi
   else
     fail "$OVPN_IF: интерфейс не найден"
@@ -532,6 +532,85 @@ status_openvpn() {
   echo
   info "Публичная команда для MikroTik использует: http://$server_ip:$HTTP_PORT"
   return "$problems"
+}
+
+publish_on() {
+  require_root || return 1
+  load_config
+
+  if ! command_exists systemctl; then
+    fail "systemctl не найден."
+    return 1
+  fi
+
+  if [[ ! -f "$HTTP_SERVICE_FILE" ]]; then
+    warn "$HTTP_SERVICE_FILE не найден. Создаю безопасный HTTP publish service."
+    ensure_http_publish_service || return 1
+    if [[ ! -f "$HTTP_SERVICE_FILE" ]]; then
+      fail "$HTTP_SERVICE_FILE не создан. HTTP publish не включён."
+      return 1
+    fi
+  fi
+
+  systemctl enable "$HTTP_SERVICE" >/dev/null 2>&1 || true
+  if ! systemctl start "$HTTP_SERVICE"; then
+    fail "Не удалось запустить $HTTP_SERVICE."
+    return 1
+  fi
+  ok "HTTP publish включён временно."
+  publish_status
+}
+
+publish_off() {
+  require_root || return 1
+  load_config
+
+  if ! command_exists systemctl; then
+    fail "systemctl не найден."
+    return 1
+  fi
+
+  systemctl stop "$HTTP_SERVICE" >/dev/null 2>&1 || true
+  ok "HTTP publish отключён. OpenVPN не тронут."
+  publish_status
+}
+
+publish_status() {
+  load_config
+  local server_ip active
+  server_ip="$(get_server_ip)"
+  active="no"
+
+  echo "HTTP publish status"
+  echo
+
+  if command_exists systemctl && systemctl is-active --quiet "$HTTP_SERVICE"; then
+    active="yes"
+    ok "$HTTP_SERVICE: active"
+  else
+    warn "$HTTP_SERVICE: inactive"
+  fi
+
+  echo
+  echo "URL публикации:"
+  echo "http://$server_ip:$HTTP_PORT/clients/mikrotik.ovpn"
+  echo "http://$server_ip:$HTTP_PORT/mikrotik/svnet-mikrotik-install.rsc"
+  echo "http://$server_ip:$HTTP_PORT/mikrotik/svnet-mikrotik-split-vpnfirst.rsc"
+  echo
+
+  if [[ "$active" == "yes" ]]; then
+    check_http_url "http://127.0.0.1:${HTTP_PORT}/clients/mikrotik.ovpn" \
+      && ok "clients/mikrotik.ovpn: 200 OK" \
+      || warn "clients/mikrotik.ovpn: нет 200 OK"
+    check_http_url "http://127.0.0.1:${HTTP_PORT}/mikrotik/svnet-mikrotik-install.rsc" \
+      && ok "mikrotik/install.rsc: 200 OK" \
+      || warn "mikrotik/install.rsc: нет 200 OK"
+    check_http_url "http://127.0.0.1:${HTTP_PORT}/mikrotik/svnet-mikrotik-split-vpnfirst.rsc" \
+      && ok "mikrotik/split-vpnfirst.rsc: 200 OK" \
+      || warn "mikrotik/split-vpnfirst.rsc: нет 200 OK"
+  else
+    info "Публикация конфигов отключена. Для установки MikroTik включите: sudo svnet --publish-on"
+  fi
 }
 
 restart_openvpn() {
@@ -1370,6 +1449,9 @@ mikrotik_menu() {
     echo "5) Сгенерировать новый клиент MikroTik"
     echo "6) Показать текущий режим"
     echo "7) Показать команды проверки на MikroTik"
+    echo "8) Временно включить публикацию конфигов"
+    echo "9) Отключить публикацию конфигов"
+    echo "10) Проверить публикацию"
     echo "0) Назад"
     echo
     read -r -p "Выберите пункт: " choice || return 0
@@ -1386,6 +1468,9 @@ mikrotik_menu() {
       5) generate_new_mikrotik_client; pause ;;
       6) show_current_mode; pause ;;
       7) show_mikrotik_verify_commands; pause ;;
+      8) publish_on; pause ;;
+      9) publish_off; pause ;;
+      10) publish_status; pause ;;
       0) return 0 ;;
       *) warn "Неверный пункт."; sleep 1 ;;
     esac
@@ -1613,65 +1698,333 @@ server_diagnostics() {
   find "$BASE_DIR" -maxdepth 3 -printf '%M %s %p\n' 2>/dev/null | sort || true
 }
 
-update_svobodanet() {
-  require_root || return 1
+resolve_update_repo() {
   load_config
+  local script_dir git_root
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-  echo "Обновить СвободаNET"
-  echo
-
-  if [[ ! -d "$REPO_DIR/.git" ]]; then
-    warn "Установка не связана с Git-репозиторием: $REPO_DIR"
-    cat <<TEXT
-Обновление вручную:
-1. Скачайте новую версию репозитория.
-2. Выполните sudo ./install.sh.
-3. Installer увидит существующую установку и предложит Safe Upgrade.
-TEXT
+  if [[ -d "$REPO_DIR/.git" ]]; then
+    printf '%s\n' "$REPO_DIR"
     return 0
   fi
 
-  if [[ ! -x "$REPO_DIR/update.sh" ]]; then
-    fail "Не найден исполняемый updater: $REPO_DIR/update.sh"
-    return 1
+  if [[ -d "$script_dir/.git" ]]; then
+    printf '%s\n' "$script_dir"
+    return 0
   fi
+
+  git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$git_root" && -d "$git_root/.git" ]]; then
+    printf '%s\n' "$git_root"
+    return 0
+  fi
+
+  return 1
+}
+
+read_local_version() {
+  local repo="$1"
+  load_config
+
+  if [[ -n "${SVNET_VERSION:-}" ]]; then
+    printf '%s\n' "$SVNET_VERSION"
+  elif [[ -f "$repo/VERSION" ]]; then
+    tr -d '[:space:]' < "$repo/VERSION"
+  else
+    "$CLI" --version 2>/dev/null | awk '{print $NF; exit}' || printf '%s\n' "$VERSION"
+  fi
+}
+
+read_remote_version() {
+  local repo="$1"
+  git -C "$repo" show origin/main:VERSION 2>/dev/null | tr -d '[:space:]' || true
+}
+
+collect_update_info() {
+  local fetch="${1:-yes}"
+
+  UPDATE_REPO="$(resolve_update_repo)" || {
+    fail "Git-репозиторий СвободаNET не найден."
+    cat <<TEXT
+Проверьте один из вариантов:
+- /opt/svobodanet/repo должен быть Git-репозиторием
+- либо запускайте svnet из клонированного репозитория
+
+Для ручного обновления:
+git clone https://github.com/kadixLife/SVNET.git
+cd SVNET
+sudo ./install.sh
+TEXT
+    return 1
+  }
 
   if ! command_exists git; then
     fail "git не найден."
     return 1
   fi
 
-  (cd "$REPO_DIR" && git fetch --tags --prune) || {
-    fail "git fetch не выполнен."
+  UPDATE_REMOTE_URL="$(git -C "$UPDATE_REPO" remote get-url origin 2>/dev/null || true)"
+  if [[ -z "$UPDATE_REMOTE_URL" ]]; then
+    fail "Git remote origin не настроен в $UPDATE_REPO."
     return 1
-  }
+  fi
 
-  local local_version remote_version upstream
-  local_version="$VERSION"
-  upstream="$(cd "$REPO_DIR" && git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || true)"
-  remote_version="$(cd "$REPO_DIR" && git show "${upstream:-origin/HEAD}:VERSION" 2>/dev/null || true)"
-  remote_version="${remote_version:-неизвестно}"
+  if [[ "$fetch" == "yes" ]]; then
+    git -C "$UPDATE_REPO" fetch origin || {
+      fail "git fetch origin не выполнен."
+      return 1
+    }
+  fi
 
-  echo "Текущая версия: $local_version"
-  echo "Версия в Git: $remote_version"
+  UPDATE_LOCAL_VERSION="$(read_local_version "$UPDATE_REPO")"
+  UPDATE_REMOTE_VERSION="$(read_remote_version "$UPDATE_REPO")"
+  UPDATE_REMOTE_VERSION="${UPDATE_REMOTE_VERSION:-неизвестно}"
+  UPDATE_LOCAL_COMMIT_FULL="$(git -C "$UPDATE_REPO" rev-parse HEAD 2>/dev/null || true)"
+  UPDATE_REMOTE_COMMIT_FULL="$(git -C "$UPDATE_REPO" rev-parse origin/main 2>/dev/null || true)"
+  UPDATE_LOCAL_COMMIT="$(git -C "$UPDATE_REPO" rev-parse --short HEAD 2>/dev/null || true)"
+  UPDATE_REMOTE_COMMIT="$(git -C "$UPDATE_REPO" rev-parse --short origin/main 2>/dev/null || true)"
+  UPDATE_DIRTY="$(git -C "$UPDATE_REPO" status --porcelain 2>/dev/null || true)"
+  UPDATE_STATUS="unknown"
 
-  if [[ "$remote_version" == "$local_version" ]]; then
-    ok "Установлена актуальная версия."
+  if [[ -z "$UPDATE_LOCAL_COMMIT_FULL" || -z "$UPDATE_REMOTE_COMMIT_FULL" ]]; then
+    UPDATE_STATUS="unknown"
+  elif [[ "$UPDATE_LOCAL_COMMIT_FULL" == "$UPDATE_REMOTE_COMMIT_FULL" ]]; then
+    UPDATE_STATUS="current"
+  elif git -C "$UPDATE_REPO" merge-base --is-ancestor "$UPDATE_LOCAL_COMMIT_FULL" "$UPDATE_REMOTE_COMMIT_FULL" 2>/dev/null; then
+    UPDATE_STATUS="update_available"
+  elif git -C "$UPDATE_REPO" merge-base --is-ancestor "$UPDATE_REMOTE_COMMIT_FULL" "$UPDATE_LOCAL_COMMIT_FULL" 2>/dev/null; then
+    UPDATE_STATUS="local_ahead"
+  else
+    UPDATE_STATUS="diverged"
+  fi
+}
+
+print_update_summary() {
+  echo "Установленная версия: $UPDATE_LOCAL_VERSION"
+  echo "Версия в репозитории: $UPDATE_REMOTE_VERSION"
+  echo "Локальный commit: ${UPDATE_LOCAL_COMMIT:-неизвестно}"
+  echo "Удалённый commit: ${UPDATE_REMOTE_COMMIT:-неизвестно}"
+  echo "Git remote: $UPDATE_REMOTE_URL"
+  echo "Путь repo: $UPDATE_REPO"
+  if [[ -n "$UPDATE_DIRTY" ]]; then
+    echo "Локальные изменения: есть"
+  else
+    echo "Локальные изменения: нет"
+  fi
+
+  case "$UPDATE_STATUS" in
+    current) echo "Статус: установлена актуальная версия" ;;
+    update_available) echo "Статус: доступно обновление" ;;
+    local_ahead) echo "Статус: локальная версия новее GitHub или не запушена" ;;
+    diverged) echo "Статус: локальная и удалённая истории разошлись" ;;
+    *) echo "Статус: не удалось определить" ;;
+  esac
+}
+
+show_update_changes() {
+  collect_update_info yes || return 1
+  echo "Что изменилось:"
+  echo
+
+  if [[ "$UPDATE_STATUS" != "update_available" ]]; then
+    info "Нет удалённых изменений для показа."
     return 0
   fi
 
+  local commits
+  commits="$(git -C "$UPDATE_REPO" log --oneline HEAD..origin/main 2>/dev/null || true)"
+  if [[ -n "$commits" ]]; then
+    printf '%s\n' "$commits" | sed 's/^/- /'
+  elif git -C "$UPDATE_REPO" show origin/main:CHANGELOG.md >/dev/null 2>&1; then
+    git -C "$UPDATE_REPO" show origin/main:CHANGELOG.md | sed -n '1,80p'
+  else
+    warn "CHANGELOG и список commits недоступны."
+  fi
+}
+
+check_updates() {
+  collect_update_info yes || return 1
+  print_update_summary
   echo
-  if [[ "$remote_version" != "неизвестно" ]]; then
-    warn "Доступна новая версия: $remote_version."
+
+  case "$UPDATE_STATUS" in
+    current)
+      ok "Установлена актуальная версия СвободаNET."
+      ;;
+    update_available)
+      info "Доступна новая версия СвободаNET."
+      echo
+      show_update_changes || true
+      echo
+      if confirm "Обновить сейчас?"; then
+        update_svobodanet
+      fi
+      ;;
+    local_ahead)
+      warn "Локальная версия новее origin/main. Push или проверьте ветку перед обновлением."
+      ;;
+    diverged)
+      fail "Локальные и удалённые изменения разошлись. Автоматическое обновление остановлено."
+      ;;
+    *)
+      fail "Не удалось определить состояние обновления."
+      ;;
+  esac
+}
+
+update_dry_run() {
+  collect_update_info yes || return 1
+  print_update_summary
+  echo
+
+  if [[ "$UPDATE_STATUS" != "update_available" ]]; then
+    ok "Удалённых изменений для применения нет."
+    echo "Сервисы не будут перезапущены."
+    echo "Файлы не будут изменены."
+    return 0
   fi
 
-  confirm "Обновить СвободаNET через Git сейчас?" || {
+  echo "Будут изменены файлы:"
+  local files
+  files="$(git -C "$UPDATE_REPO" diff --name-only HEAD..origin/main 2>/dev/null || true)"
+  if [[ -n "$files" ]]; then
+    printf '%s\n' "$files" | sed 's/^/- /'
+  else
+    warn "Список файлов получить не удалось."
+  fi
+  echo
+  echo "Сервисы не будут перезапущены."
+  echo "Файлы не будут изменены."
+}
+
+update_config_version() {
+  local new_version="$1"
+  [[ -f "$CONFIG" ]] || return 0
+
+  local tmp
+  tmp="${CONFIG}.tmp.$$"
+  if grep -q '^SVNET_VERSION=' "$CONFIG"; then
+    sed "s/^SVNET_VERSION=.*/SVNET_VERSION=\"$new_version\"/" "$CONFIG" > "$tmp" && mv -f "$tmp" "$CONFIG"
+  else
+    printf '\nSVNET_VERSION="%s"\n' "$new_version" >> "$CONFIG"
+  fi
+}
+
+run_pending_migrations() {
+  local repo="$1"
+  local marker_dir="$BASE_DIR/config/migrations-applied"
+  local migration name
+
+  [[ -d "$repo/migrations" ]] || return 0
+  mkdir -p "$marker_dir"
+
+  for migration in "$repo"/migrations/*.sh; do
+    [[ -f "$migration" ]] || continue
+    name="$(basename "$migration")"
+    [[ -f "$marker_dir/$name" ]] && continue
+    CONFIG_DIR="$BASE_DIR/config" LISTS_DIR="$LISTS" bash "$migration" || return 1
+    touch "$marker_dir/$name"
+    ok "Migration applied: $name"
+  done
+}
+
+update_svobodanet() {
+  require_root || return 1
+  collect_update_info yes || return 1
+
+  if [[ -n "$UPDATE_DIRTY" ]]; then
+    fail "В репозитории есть локальные изменения. Автоматическое обновление остановлено."
+    echo "Проверьте: git -C \"$UPDATE_REPO\" status"
+    return 1
+  fi
+
+  if [[ "$UPDATE_STATUS" == "current" ]]; then
+    ok "Установлена актуальная версия СвободаNET."
+    return 0
+  fi
+
+  if [[ "$UPDATE_STATUS" != "update_available" ]]; then
+    fail "Обновление невозможно без fast-forward."
+    echo "Проверьте: git -C \"$UPDATE_REPO\" status"
+    return 1
+  fi
+
+  print_update_summary
+  echo
+  show_update_changes || true
+  echo
+  confirm "Начать безопасное обновление?" || {
     info "Обновление отменено."
     return 0
   }
 
-  create_backup "pre-upgrade" || return 1
-  "$REPO_DIR/update.sh"
+  create_backup "pre-update" || return 1
+
+  if ! git -C "$UPDATE_REPO" pull --ff-only origin main; then
+    fail "Невозможно выполнить fast-forward update."
+    echo "Локальные изменения мешают обновлению."
+    echo "Сначала проверьте: git -C \"$UPDATE_REPO\" status"
+    echo "Rollback: sudo svnet -> Backup / Restore"
+    return 1
+  fi
+
+  if [[ -x "$UPDATE_REPO/tests/bash-syntax.sh" ]]; then
+    bash "$UPDATE_REPO/tests/bash-syntax.sh" || return 1
+  fi
+  bash -n "$UPDATE_REPO/svnet" || return 1
+  install -m 0755 "$UPDATE_REPO/svnet" "$CLI"
+
+  local new_version
+  new_version="$(tr -d '[:space:]' < "$UPDATE_REPO/VERSION" 2>/dev/null || printf '%s' "$VERSION")"
+  update_config_version "$new_version"
+  run_pending_migrations "$UPDATE_REPO" || return 1
+
+  echo
+  "$CLI" --status || true
+
+  local openvpn_state http_state mt_state
+  openvpn_state="unknown"
+  http_state="offline"
+  mt_state="WARN"
+  command_exists systemctl && openvpn_state="$(systemctl is-active "$OVPN_SERVICE" 2>/dev/null || true)"
+  command_exists systemctl && systemctl is-active --quiet "$HTTP_SERVICE" && http_state="active"
+  [[ -s "$MIKROTIK/svnet-mikrotik-split-vpnfirst.rsc" && -s "$MIKROTIK/svnet-mikrotik-install.rsc" ]] && mt_state="OK"
+
+  echo
+  ok "СвободаNET успешно обновлён."
+  echo "Версия: $new_version"
+  echo "OpenVPN: $openvpn_state"
+  echo "HTTP publish: $http_state"
+  echo "MikroTik configs: $mt_state"
+}
+
+updates_menu() {
+  local choice
+  while true; do
+    header
+    echo "8) Проверить обновления СвободаNET"
+    echo
+    echo "Проверяет GitHub-репозиторий, сравнивает установленную версию с актуальной,"
+    echo "показывает список изменений и предлагает безопасно обновить проект."
+    echo
+    echo "1) Проверить наличие обновлений"
+    echo "2) Показать текущую версию"
+    echo "3) Показать changelog / последние изменения"
+    echo "4) Dry-run обновления"
+    echo "5) Обновить сейчас"
+    echo "0) Назад"
+    echo
+    read -r -p "Выберите пункт: " choice || return 0
+    case "$choice" in
+      1) check_updates; pause ;;
+      2) collect_update_info yes && print_update_summary; pause ;;
+      3) show_update_changes; pause ;;
+      4) update_dry_run; pause ;;
+      5) update_svobodanet; pause ;;
+      0) return 0 ;;
+      *) warn "Неверный пункт."; sleep 1 ;;
+    esac
+  done
 }
 
 project_info() {
@@ -1728,7 +2081,7 @@ main_menu() {
     echo "5) Сайты, IP и правила маршрутизации"
     echo "6) Backup / Restore"
     echo "7) Диагностика сервера"
-    echo "8) Обновить СвободаNET"
+    echo "8) Проверить обновления СвободаNET"
     echo "9) Информация о проекте"
     echo "0) Выход"
     echo
@@ -1742,7 +2095,7 @@ main_menu() {
       5) routes_menu ;;
       6) backup_menu ;;
       7) server_diagnostics; pause ;;
-      8) update_svobodanet; pause ;;
+      8) updates_menu ;;
       9) project_info; pause ;;
       0) exit 0 ;;
       *) warn "Неверный пункт."; sleep 1 ;;
@@ -1762,7 +2115,15 @@ Usage:
   svnet --prepare-mikrotik
                           generate MikroTik .rsc files
   svnet --backup       create backup
+  svnet --check-updates
+                          check GitHub repository for updates
+  svnet --update-dry-run
+                          show files that would change during update
   svnet --update       update from Git repository
+  svnet --publish-on   start HTTP publish for MikroTik setup
+  svnet --publish-off  stop HTTP publish after MikroTik setup
+  svnet --publish-status
+                          show HTTP publish state and URLs
   svnet --help         show this help
 TEXT
 }
@@ -1784,8 +2145,23 @@ main() {
     --backup)
       create_backup manual
       ;;
+    --check-updates)
+      check_updates
+      ;;
+    --update-dry-run)
+      update_dry_run
+      ;;
     --update)
       update_svobodanet
+      ;;
+    --publish-on)
+      publish_on
+      ;;
+    --publish-off)
+      publish_off
+      ;;
+    --publish-status)
+      publish_status
       ;;
     --help|-h)
       show_help

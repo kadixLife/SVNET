@@ -47,7 +47,7 @@ MikroTik
 ```bash
 sudo apt update
 sudo apt install -y git
-git clone https://github.com/OWNER/svobodanet.git
+git clone https://github.com/kadixLife/SVNET.git
 cd svobodanet
 sudo ./install.sh
 ```
@@ -86,6 +86,12 @@ Safe Upgrade создаёт backup, обновляет менеджер/шабл
 ```
 
 `SERVER_IP` и порт будут подставлены installer-ом. Скрипты работают только с объектами `SVNET` и не делают reset роутера.
+
+Важно: HTTP publish нужен только на время установки MikroTik. После импорта конфигов рекомендуется отключить публикацию, потому что `.ovpn` может содержать клиентские ключи:
+
+```bash
+sudo svnet --publish-off
+```
 
 ## Режимы
 
@@ -130,6 +136,18 @@ sudo svnet --doctor
 
 Проверяются OpenVPN, tunnel interface, ports, ip_forward, iptables, HTTP publish, output-файлы, public IP и WAN interface.
 
+## HTTP publish
+
+Публикация конфигов работает через `svnet-http.service` и порт `8088`. Включайте её только на время установки или обновления MikroTik:
+
+```bash
+sudo svnet --publish-on
+sudo svnet --publish-status
+sudo svnet --publish-off
+```
+
+`--publish-off` останавливает HTTP publish и не трогает OpenVPN, UDP `1194`, firewall rules и сгенерированные `.rsc` файлы.
+
 ## Безопасность
 
 В Git нельзя публиковать приватные ключи и реальные клиентские конфиги. `.gitignore` исключает:
@@ -160,16 +178,24 @@ sudo ./uninstall.sh
 ## Обновление через Git
 
 ```bash
+sudo svnet --check-updates
+sudo svnet --update-dry-run
 sudo svnet --update
 ```
 
-или:
+`--check-updates` делает `git fetch`, показывает установленную версию, версию в `origin/main`, commit, remote и путь репозитория.
+
+`--update-dry-run` показывает список файлов, которые изменятся при обновлении. Сервисы не перезапускаются и файлы не меняются.
+
+`--update` создаёт `pre-update` backup, применяет только fast-forward update через `git pull --ff-only origin main`, проверяет bash-синтаксис, обновляет `/usr/local/bin/svnet`, сохраняет пользовательские параметры в `/opt/svobodanet/config/svnet.conf`, применяет новые миграции и запускает `svnet --status`.
+
+Если локальные изменения конфликтуют с GitHub или история разошлась, автоматическое обновление останавливается. Updater не делает destructive reinstall, не удаляет `/opt/svobodanet`, сертификаты, ключи, списки, UDP `1194`, firewall rules и рабочие MikroTik `.rsc`.
+
+Старый wrapper также доступен:
 
 ```bash
 sudo ./update.sh
 ```
-
-Updater делает `git fetch`, показывает новую версию и changelog, создаёт backup, применяет fast-forward update и проверяет сервисы.
 
 ## Roadmap
 
