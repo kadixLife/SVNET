@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+*.sh text eol=lf
+svnet text eol=lf
+*.md text eol=lf
+*.tpl text eol=lf
+*.rsc text eol=lf

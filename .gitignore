@@ -1,0 +1,16 @@
+/backup/
+/backups/
+/output/
+/config/svnet.conf
+*.key
+*.pem
+*.p12
+*.ovpn
+*.log
+.env
+*.backup
+*.bak
+*.tmp
+*.tar
+*.tar.gz
+__pycache__/

@@ -1,0 +1,1804 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+VERSION="1.0.0"
+
+BASE_DIR="/opt/svobodanet"
+CONFIG="/opt/svobodanet/config/svnet.conf"
+LISTS="/opt/svobodanet/lists"
+OUTPUT="/opt/svobodanet/output"
+CLIENTS="/opt/svobodanet/output/clients"
+MIKROTIK="/opt/svobodanet/output/mikrotik"
+BACKUPS="/opt/svobodanet/backups"
+CLI="/usr/local/bin/svnet"
+REPO_DIR="${SVNET_REPO_DIR:-/opt/svobodanet/repo}"
+ADMIN_DIR="/opt/svobodanet-admin"
+
+OVPN_SERVICE="openvpn-server@svnet"
+HTTP_SERVICE="svnet-http.service"
+OVPN_SERVER_CONF="/etc/openvpn/server/svnet.conf"
+HTTP_SERVICE_FILE="/etc/systemd/system/svnet-http.service"
+EASYRSA_DIR="/etc/openvpn/easy-rsa"
+
+PROJECT_NAME="СвободаNET"
+SERVER_IP=""
+WAN_IF="wan"
+OVPN_NAME="svnet"
+OVPN_IF="tun-svnet"
+CLIENT_NAME="mikrotik"
+OVPN_PORT="1194"
+OVPN_PROTO="udp"
+VPN_NET="10.88.0.0/24"
+VPN_CIDR="10.88.0.0/24"
+VPN_SERVER_IP="10.88.0.1"
+MIKROTIK_VPN_IP="10.88.0.2"
+CLIENT_IP="10.88.0.2"
+MIKROTIK_LAN="192.168.50.0/24"
+MIKROTIK_WAN="pppoe-wan"
+MIKROTIK_OVPN_IF="ovpn-svnet"
+MIKROTIK_LAN_DNS="192.168.50.1"
+HTTP_PORT="8088"
+
+if [[ -t 1 ]]; then
+  RED=$'\033[31m'
+  GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'
+  BLUE=$'\033[34m'
+  BOLD=$'\033[1m'
+  RESET=$'\033[0m'
+else
+  RED=""
+  GREEN=""
+  YELLOW=""
+  BLUE=""
+  BOLD=""
+  RESET=""
+fi
+
+ok() { printf '%s[OK]%s %s\n' "$GREEN" "$RESET" "$*"; }
+warn() { printf '%s[WARN]%s %s\n' "$YELLOW" "$RESET" "$*"; }
+fail() { printf '%s[FAIL]%s %s\n' "$RED" "$RESET" "$*"; }
+info() { printf '%s[INFO]%s %s\n' "$BLUE" "$RESET" "$*"; }
+
+pause() {
+  echo
+  read -r -p "Нажмите Enter, чтобы вернуться в меню..." _ || true
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+is_root() {
+  [[ "${EUID:-$(id -u)}" -eq 0 ]]
+}
+
+require_root() {
+  if ! is_root; then
+    fail "Это действие нужно запустить от root."
+    echo "Пример: sudo $CLI"
+    return 1
+  fi
+}
+
+confirm() {
+  local prompt="$1"
+  local answer
+  read -r -p "$prompt [y/N] " answer || return 1
+  [[ "$answer" == "y" || "$answer" == "Y" || "$answer" == "yes" || "$answer" == "YES" ]]
+}
+
+confirm_word() {
+  local prompt="$1"
+  local expected="$2"
+  local answer
+  echo "$prompt"
+  read -r -p "Введите $expected для подтверждения: " answer || return 1
+  [[ "$answer" == "$expected" ]]
+}
+
+detect_wan_if() {
+  if command_exists ip; then
+    ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}'
+  fi
+}
+
+get_server_ip() {
+  if [[ -n "${SERVER_IP:-}" && "${SERVER_IP:-}" != "AUTO" ]]; then
+    printf '%s\n' "$SERVER_IP"
+    return 0
+  fi
+
+  if command_exists curl; then
+    SERVER_IP="$(curl -fsS4 --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+  fi
+
+  if [[ -z "${SERVER_IP:-}" ]] && command_exists hostname; then
+    SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+
+  if [[ -z "${SERVER_IP:-}" ]]; then
+    SERVER_IP="SERVER_IP"
+  fi
+
+  printf '%s\n' "$SERVER_IP"
+}
+
+load_config() {
+  if [[ -f "$CONFIG" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG"
+  fi
+
+  WAN_IF="${WAN_IF:-$(detect_wan_if)}"
+  WAN_IF="${WAN_IF:-wan}"
+  OVPN_NAME="${OVPN_NAME:-svnet}"
+  OVPN_IF="${OVPN_IF:-tun-svnet}"
+  CLIENT_NAME="${CLIENT_NAME:-mikrotik}"
+  OVPN_PORT="${OVPN_PORT:-1194}"
+  OVPN_PROTO="${OVPN_PROTO:-udp}"
+  VPN_NET="${VPN_NET:-${VPN_CIDR:-10.88.0.0/24}}"
+  VPN_CIDR="${VPN_CIDR:-$VPN_NET}"
+  VPN_SERVER_IP="${VPN_SERVER_IP:-10.88.0.1}"
+  MIKROTIK_VPN_IP="${MIKROTIK_VPN_IP:-${CLIENT_IP:-10.88.0.2}}"
+  CLIENT_IP="${CLIENT_IP:-$MIKROTIK_VPN_IP}"
+  MIKROTIK_LAN="${MIKROTIK_LAN:-192.168.50.0/24}"
+  MIKROTIK_WAN="${MIKROTIK_WAN:-pppoe-wan}"
+  MIKROTIK_OVPN_IF="${MIKROTIK_OVPN_IF:-ovpn-svnet}"
+  MIKROTIK_LAN_DNS="${MIKROTIK_LAN_DNS:-192.168.50.1}"
+  HTTP_PORT="${HTTP_PORT:-8088}"
+}
+
+systemd_unit_exists() {
+  command_exists systemctl && systemctl list-unit-files "$1" >/dev/null 2>&1
+}
+
+detect_mode() {
+  if [[ -d "$BASE_DIR" || -f "$OVPN_SERVER_CONF" ]] || systemd_unit_exists "$OVPN_SERVICE"; then
+    printf '%s\n' "Safe Upgrade Mode"
+  else
+    printf '%s\n' "Fresh Install Mode"
+  fi
+}
+
+header() {
+  local mode
+  mode="$(detect_mode)"
+  clear 2>/dev/null || true
+  printf '%sСвободаNET Manager v%s%s\n' "$BOLD" "$VERSION" "$RESET"
+  echo "Режим: $mode"
+  echo
+}
+
+ensure_base_dirs() {
+  mkdir -p "$BASE_DIR/config" "$LISTS" "$OUTPUT" "$CLIENTS" "$MIKROTIK" "$BACKUPS"
+}
+
+write_default_file() {
+  local file="$1"
+  local content="$2"
+  if [[ ! -f "$file" ]]; then
+    printf '%s\n' "$content" > "$file"
+    ok "Создан список: $file"
+  fi
+}
+
+ensure_default_lists() {
+  require_root || return 1
+  mkdir -p "$LISTS"
+
+  write_default_file "$LISTS/direct-domains.txt" "yandex.ru
+ya.ru
+yandex.net
+yandex.st
+yastatic.net
+vk.com
+vk.ru
+userapi.com
+gosuslugi.ru
+esia.gosuslugi.ru
+nalog.gov.ru
+sber.ru
+sberbank.ru
+tbank.ru
+tinkoff.ru
+vtb.ru
+ozon.ru
+wildberries.ru
+wb.ru
+mail.ru
+ok.ru"
+
+  write_default_file "$LISTS/vpn-domains.txt" "youtube.com
+googlevideo.com
+ytimg.com
+google.com
+gstatic.com
+ggpht.com
+instagram.com
+facebook.com
+fbcdn.net
+whatsapp.com
+whatsapp.net
+discord.com
+discord.gg
+telegram.org
+t.me
+x.com
+twitter.com
+openai.com
+chatgpt.com"
+
+  write_default_file "$LISTS/local-bypass.txt" "192.168.50.0/24
+192.168.0.0/16
+10.0.0.0/8
+172.16.0.0/12
+127.0.0.0/8
+169.254.0.0/16"
+
+  [[ -f "$LISTS/direct-ip.txt" ]] || : > "$LISTS/direct-ip.txt"
+  [[ -f "$LISTS/vpn-ip.txt" ]] || : > "$LISTS/vpn-ip.txt"
+}
+
+safe_remove_stage() {
+  local stage="$1"
+  case "$stage" in
+    "$BACKUPS"/.staging-*) rm -rf -- "$stage" ;;
+    *) warn "Временная директория backup не удалена: $stage" ;;
+  esac
+}
+
+copy_path_to_stage() {
+  local src="$1"
+  local dst="$2"
+  if [[ -e "$src" ]]; then
+    mkdir -p "$(dirname "$dst")"
+    cp -a "$src" "$dst"
+  fi
+}
+
+cleanup_regular_backups() {
+  local backups
+  mapfile -t backups < <(find "$BACKUPS" -maxdepth 1 -type f -name 'svnet-backup-manual-*.tar.gz' 2>/dev/null | sort)
+  local count="${#backups[@]}"
+  local remove_count=$((count - 3))
+
+  if (( remove_count <= 0 )); then
+    return 0
+  fi
+
+  local i
+  for ((i = 0; i < remove_count; i++)); do
+    rm -f -- "${backups[$i]}"
+  done
+}
+
+create_backup() {
+  local kind="${1:-manual}"
+  require_root || return 1
+  load_config
+  ensure_base_dirs
+
+  local ts archive stage
+  ts="$(date +%Y-%m-%d_%H-%M-%S)"
+  archive="$BACKUPS/svnet-backup-${kind}-${ts}.tar.gz"
+  stage="$BACKUPS/.staging-${kind}-${ts}-$$"
+
+  mkdir -p "$stage"
+
+  copy_path_to_stage "$BASE_DIR/config" "$stage/opt/svobodanet/config"
+  copy_path_to_stage "$BASE_DIR/lists" "$stage/opt/svobodanet/lists"
+  copy_path_to_stage "$BASE_DIR/output" "$stage/opt/svobodanet/output"
+  copy_path_to_stage "$OVPN_SERVER_CONF" "$stage/etc/openvpn/server/svnet.conf"
+  copy_path_to_stage "$HTTP_SERVICE_FILE" "$stage/etc/systemd/system/svnet-http.service"
+  copy_path_to_stage "$CLI" "$stage/usr/local/bin/svnet"
+
+  if command_exists iptables-save; then
+    iptables-save > "$stage/iptables-save.rules" 2>/dev/null || true
+  fi
+
+  if tar -czf "$archive" -C "$stage" .; then
+    safe_remove_stage "$stage"
+    [[ "$kind" == "manual" ]] && cleanup_regular_backups
+    ok "Backup создан: $archive"
+    return 0
+  fi
+
+  safe_remove_stage "$stage"
+  fail "Backup создать не удалось."
+  return 1
+}
+
+show_backups() {
+  require_root || return 1
+  ensure_base_dirs
+
+  local backups
+  mapfile -t backups < <(find "$BACKUPS" -maxdepth 1 -type f -name 'svnet-backup-*.tar.gz' 2>/dev/null | sort -r)
+
+  if (( ${#backups[@]} == 0 )); then
+    warn "Backups не найдены."
+    return 0
+  fi
+
+  local i prefix
+  for ((i = 0; i < ${#backups[@]}; i++)); do
+    if (( i == 0 )); then
+      prefix="${GREEN}"
+    else
+      prefix=""
+    fi
+    printf '%s%2d) %s%s\n' "$prefix" "$((i + 1))" "${backups[$i]}" "$RESET"
+  done
+}
+
+restore_file_if_present() {
+  local src="$1"
+  local dst="$2"
+  if [[ -e "$src" ]]; then
+    mkdir -p "$(dirname "$dst")"
+    cp -a "$src" "$dst"
+  fi
+}
+
+restore_dir_if_present() {
+  local src="$1"
+  local dst="$2"
+  if [[ -d "$src" ]]; then
+    mkdir -p "$dst"
+    cp -a "$src/." "$dst/"
+  fi
+}
+
+restore_backup() {
+  require_root || return 1
+  ensure_base_dirs
+
+  local backups
+  mapfile -t backups < <(find "$BACKUPS" -maxdepth 1 -type f -name 'svnet-backup-*.tar.gz' 2>/dev/null | sort -r)
+  if (( ${#backups[@]} == 0 )); then
+    warn "Backups не найдены."
+    return 0
+  fi
+
+  show_backups
+  echo
+
+  local choice archive stage
+  read -r -p "Введите номер backup для восстановления: " choice || return 1
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#backups[@]} )); then
+    fail "Неверный номер backup."
+    return 1
+  fi
+
+  archive="${backups[$((choice - 1))]}"
+
+  warn "Restore может перезаписать config/lists/output/OpenVPN/systemd/CLI."
+  confirm_word "Перед restore будет создан pre-restore backup." "RESTORE" || {
+    info "Restore отменён."
+    return 0
+  }
+
+  create_backup "pre-restore" || return 1
+
+  stage="$BACKUPS/.staging-restore-$(date +%Y-%m-%d_%H-%M-%S)-$$"
+  mkdir -p "$stage"
+
+  if ! tar -xzf "$archive" -C "$stage"; then
+    safe_remove_stage "$stage"
+    fail "Не удалось распаковать backup."
+    return 1
+  fi
+
+  restore_dir_if_present "$stage/opt/svobodanet/config" "$BASE_DIR/config"
+  restore_dir_if_present "$stage/opt/svobodanet/lists" "$BASE_DIR/lists"
+  restore_dir_if_present "$stage/opt/svobodanet/output" "$BASE_DIR/output"
+  restore_file_if_present "$stage/etc/openvpn/server/svnet.conf" "$OVPN_SERVER_CONF"
+  restore_file_if_present "$stage/etc/systemd/system/svnet-http.service" "$HTTP_SERVICE_FILE"
+  restore_file_if_present "$stage/usr/local/bin/svnet" "$CLI"
+
+  if [[ -f "$stage/iptables-save.rules" ]]; then
+    if confirm "Восстановить iptables из backup сейчас?"; then
+      if command_exists iptables-restore; then
+        iptables-restore < "$stage/iptables-save.rules" && ok "iptables восстановлены."
+      else
+        warn "iptables-restore не найден."
+      fi
+    else
+      info "iptables сохранены в backup, но не применялись."
+    fi
+  fi
+
+  safe_remove_stage "$stage"
+
+  command_exists systemctl && systemctl daemon-reload >/dev/null 2>&1 || true
+  ok "Restore завершён."
+  status_openvpn
+}
+
+clean_old_backups() {
+  require_root || return 1
+  ensure_base_dirs
+  cleanup_regular_backups
+  ok "Старые обычные backups очищены. pre-* backups не удалялись."
+}
+
+check_http_url() {
+  local url="$1"
+  local code
+  if ! command_exists curl; then
+    warn "curl не найден: $url не проверен."
+    return 1
+  fi
+  code="$(curl -fsS -o /dev/null -w '%{http_code}' -I "$url" 2>/dev/null || true)"
+  [[ "$code" == "200" ]]
+}
+
+status_openvpn() {
+  load_config
+  local problems=0
+  local server_ip
+  server_ip="$(get_server_ip)"
+
+  echo "Статус OpenVPN и публикации"
+  echo
+
+  if command_exists systemctl && systemctl is-active --quiet "$OVPN_SERVICE"; then
+    ok "OpenVPN service: active"
+  else
+    fail "OpenVPN service: не active"
+    ((problems++))
+  fi
+
+  if command_exists ip && ip addr show "$OVPN_IF" >/dev/null 2>&1; then
+    if ip addr show "$OVPN_IF" 2>/dev/null | grep -q "$VPN_SERVER_IP"; then
+      ok "$OVPN_IF: $VPN_SERVER_IP"
+    else
+      warn "$OVPN_IF найден, но IP $VPN_SERVER_IP не подтверждён"
+      ip addr show "$OVPN_IF" 2>/dev/null | sed -n '1,6p'
+    fi
+  else
+    fail "$OVPN_IF: интерфейс не найден"
+    ((problems++))
+  fi
+
+  if command_exists ss && ss -lunp 2>/dev/null | grep -Eq ":${OVPN_PORT}\b.*openvpn|:${OVPN_PORT}\b"; then
+    ok "UDP port $OVPN_PORT: listening"
+  else
+    fail "UDP port $OVPN_PORT: не найден слушающий socket"
+    ((problems++))
+  fi
+
+  if command_exists sysctl && [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)" == "1" ]]; then
+    ok "net.ipv4.ip_forward=1"
+  else
+    warn "net.ipv4.ip_forward не равен 1 или sysctl недоступен"
+  fi
+
+  if command_exists iptables; then
+    iptables -C INPUT -i "$OVPN_IF" -j ACCEPT 2>/dev/null && ok "iptables INPUT $OVPN_IF: есть" || warn "iptables INPUT $OVPN_IF: не найдено"
+    iptables -C INPUT -p udp --dport "$OVPN_PORT" -j ACCEPT 2>/dev/null && ok "iptables INPUT udp/$OVPN_PORT: есть" || warn "iptables INPUT udp/$OVPN_PORT: не найдено"
+    iptables -C FORWARD -i "$OVPN_IF" -o "$WAN_IF" -j ACCEPT 2>/dev/null && ok "iptables FORWARD $OVPN_IF -> $WAN_IF: есть" || warn "iptables FORWARD $OVPN_IF -> $WAN_IF: не найдено"
+    iptables -C FORWARD -i "$WAN_IF" -o "$OVPN_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+      && ok "iptables FORWARD $WAN_IF -> $OVPN_IF RELATED,ESTABLISHED: есть" \
+      || warn "iptables FORWARD $WAN_IF -> $OVPN_IF RELATED,ESTABLISHED: не найдено"
+    iptables -t nat -C POSTROUTING -s "$VPN_CIDR" -o "$WAN_IF" -j MASQUERADE 2>/dev/null \
+      && ok "NAT $VPN_CIDR -> $WAN_IF: есть" \
+      || warn "NAT $VPN_CIDR -> $WAN_IF: не найдено"
+  else
+    warn "iptables не найден."
+  fi
+
+  if command_exists systemctl && systemctl is-active --quiet "$HTTP_SERVICE"; then
+    ok "HTTP publish service: active"
+  else
+    warn "HTTP publish service: не active"
+  fi
+
+  if check_http_url "http://127.0.0.1:${HTTP_PORT}/clients/mikrotik.ovpn"; then
+    ok "HTTP clients/mikrotik.ovpn: 200 OK"
+  else
+    warn "HTTP clients/mikrotik.ovpn: нет 200 OK"
+  fi
+
+  if check_http_url "http://127.0.0.1:${HTTP_PORT}/mikrotik/svnet-mikrotik-split-vpnfirst.rsc"; then
+    ok "HTTP split-vpnfirst.rsc: 200 OK"
+  else
+    warn "HTTP split-vpnfirst.rsc: нет 200 OK"
+  fi
+
+  local required=(
+    "$CLIENTS/mikrotik.ovpn"
+    "$MIKROTIK/svnet-mikrotik-split-vpnfirst.rsc"
+    "$MIKROTIK/svnet-mikrotik-fullvpn.rsc"
+    "$MIKROTIK/svnet-mikrotik-direct.rsc"
+    "$MIKROTIK/svnet-mikrotik-scripts.rsc"
+  )
+  local f
+  for f in "${required[@]}"; do
+    if [[ -s "$f" ]]; then
+      ok "Output file: $f"
+    else
+      warn "Output file отсутствует или пустой: $f"
+    fi
+  done
+
+  if [[ -d "$ADMIN_DIR" ]]; then
+    ok "GUI Admin Panel: подготовлена директория $ADMIN_DIR"
+  else
+    warn "GUI Admin Panel: not installed"
+  fi
+
+  echo
+  info "Публичная команда для MikroTik использует: http://$server_ip:$HTTP_PORT"
+  return "$problems"
+}
+
+restart_openvpn() {
+  require_root || return 1
+  load_config
+
+  warn "Будет создан backup и перезапущен $OVPN_SERVICE."
+  confirm "Продолжить?" || {
+    info "Перезапуск отменён."
+    return 0
+  }
+
+  if [[ "$(detect_mode)" == "Safe Upgrade Mode" ]]; then
+    create_backup "pre-openvpn-restart" || return 1
+  fi
+
+  if systemctl restart "$OVPN_SERVICE"; then
+    sleep 2
+    status_openvpn
+  else
+    fail "OpenVPN не перезапустился. Последние записи журнала:"
+    journalctl -u "$OVPN_SERVICE" -n 80 --no-pager || true
+    return 1
+  fi
+}
+
+ensure_http_publish_service() {
+  require_root || return 1
+  load_config
+
+  local desired_exec="/usr/bin/python3 -m http.server $HTTP_PORT --bind 0.0.0.0 --directory $OUTPUT"
+
+  if [[ -f "$HTTP_SERVICE_FILE" ]] && grep -Fq -- "$desired_exec" "$HTTP_SERVICE_FILE"; then
+    ok "HTTP publish service уже использует --directory $OUTPUT"
+    return 0
+  fi
+
+  warn "HTTP publish service отличается от безопасного шаблона."
+  confirm "Создать backup и обновить $HTTP_SERVICE_FILE?" || return 0
+  create_backup "pre-http-service-change" || return 1
+
+  cat > "$HTTP_SERVICE_FILE" <<HTTP
+[Unit]
+Description=SvobodaNET config HTTP server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$desired_exec
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+HTTP
+
+  systemctl daemon-reload
+  systemctl enable "$HTTP_SERVICE" >/dev/null 2>&1 || true
+  systemctl restart "$HTTP_SERVICE"
+  ok "HTTP publish service обновлён."
+}
+
+clean_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  sed 's/\r$//' "$file" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -vE '^($|#)' | sort -u
+}
+
+validate_domain() {
+  local value="$1"
+  [[ "$value" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]
+}
+
+validate_ip_or_cidr() {
+  local value="$1"
+  python3 - "$value" <<'PY' >/dev/null 2>&1
+import ipaddress
+import sys
+ipaddress.ip_network(sys.argv[1], strict=False)
+PY
+}
+
+normalize_value() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s\n' "$value"
+}
+
+add_unique_line() {
+  local file="$1"
+  local value="$2"
+  mkdir -p "$(dirname "$file")"
+  touch "$file"
+  if grep -qxF "$value" "$file"; then
+    warn "Уже есть: $value"
+    return 0
+  fi
+  printf '%s\n' "$value" >> "$file"
+  sort -u "$file" -o "$file"
+  ok "Добавлено: $value"
+}
+
+remove_line() {
+  local file="$1"
+  local value="$2"
+  if [[ ! -f "$file" ]]; then
+    warn "Список пока пуст."
+    return 0
+  fi
+  if ! grep -qxF "$value" "$file"; then
+    warn "Запись не найдена: $value"
+    return 0
+  fi
+  grep -vxF "$value" "$file" > "${file}.tmp.$$"
+  mv -f "${file}.tmp.$$" "$file"
+  ok "Удалено: $value"
+}
+
+dedupe_list() {
+  local file="$1"
+  [[ -f "$file" ]] || : > "$file"
+  clean_file "$file" > "${file}.tmp.$$"
+  mv -f "${file}.tmp.$$" "$file"
+  ok "Дубли очищены."
+}
+
+validate_list_file() {
+  local file="$1"
+  local type="$2"
+  local invalid=0
+  local duplicates=0
+  local line
+
+  if [[ ! -f "$file" ]]; then
+    warn "Список не найден: $file"
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    line="$(normalize_value "$line")"
+    [[ -z "$line" || "$line" =~ ^# ]] && continue
+    if [[ "$type" == "domain" ]]; then
+      validate_domain "$line" || {
+        fail "Неверный домен: $line"
+        ((invalid++))
+      }
+    else
+      validate_ip_or_cidr "$line" || {
+        fail "Неверный IP/подсеть: $line"
+        ((invalid++))
+      }
+    fi
+  done < "$file"
+
+  duplicates="$(sort "$file" 2>/dev/null | uniq -d | grep -vcE '^($|#)' || true)"
+  if (( duplicates > 0 )); then
+    warn "Найдены дубли: $duplicates"
+  fi
+
+  if (( invalid == 0 && duplicates == 0 )); then
+    ok "Ошибки не найдены."
+  else
+    warn "Проверьте список перед генерацией MikroTik правил."
+  fi
+
+  return 0
+}
+
+list_file_by_key() {
+  case "$1" in
+    direct_domains) printf '%s\n' "$LISTS/direct-domains.txt" ;;
+    vpn_domains) printf '%s\n' "$LISTS/vpn-domains.txt" ;;
+    direct_ip) printf '%s\n' "$LISTS/direct-ip.txt" ;;
+    vpn_ip) printf '%s\n' "$LISTS/vpn-ip.txt" ;;
+    local_bypass) printf '%s\n' "$LISTS/local-bypass.txt" ;;
+    *) return 1 ;;
+  esac
+}
+
+list_title_by_key() {
+  case "$1" in
+    direct_domains) printf '%s\n' "Российские сайты напрямую без VPN" ;;
+    vpn_domains) printf '%s\n' "Заблокированные сайты через VPN" ;;
+    direct_ip) printf '%s\n' "Российские IP/подсети напрямую без VPN" ;;
+    vpn_ip) printf '%s\n' "IP/подсети принудительно через VPN" ;;
+    local_bypass) printf '%s\n' "Локальная сеть без VPN" ;;
+    *) return 1 ;;
+  esac
+}
+
+list_type_by_key() {
+  case "$1" in
+    direct_domains|vpn_domains) printf '%s\n' "domain" ;;
+    direct_ip|vpn_ip|local_bypass) printf '%s\n' "ip" ;;
+    *) return 1 ;;
+  esac
+}
+
+prompt_rebuild_after_list_change() {
+  if confirm "Списки изменены. Пересобрать правила для MikroTik сейчас?"; then
+    generate_mikrotik_configs
+  fi
+}
+
+show_add_hint() {
+  local type="$1"
+  if [[ "$type" == "domain" ]]; then
+    cat <<'TEXT'
+Введите домен без https:// и без слэшей.
+Правильно: yandex.ru
+Неправильно: https://yandex.ru/
+TEXT
+  else
+    cat <<'TEXT'
+Введите IP или подсеть.
+Правильно: 192.168.50.0/24 или 8.8.8.8
+Неправильно: http://8.8.8.8
+TEXT
+  fi
+}
+
+manage_one_list() {
+  require_root || return 1
+  load_config
+  ensure_default_lists || return 1
+
+  local key="$1"
+  local file title type choice value
+  file="$(list_file_by_key "$key")"
+  title="$(list_title_by_key "$key")"
+  type="$(list_type_by_key "$key")"
+
+  while true; do
+    header
+    echo "$title"
+    echo
+    echo "1) Показать список"
+    echo "2) Добавить запись"
+    echo "3) Удалить запись"
+    echo "4) Добавить сразу много строк"
+    echo "5) Очистить дубли"
+    echo "6) Проверить ошибки"
+    echo "7) Сохранить и пересобрать правила"
+    echo "0) Назад"
+    echo
+    read -r -p "Выберите пункт: " choice || return 0
+
+    case "$choice" in
+      1)
+        echo
+        clean_file "$file" || true
+        pause
+        ;;
+      2)
+        show_add_hint "$type"
+        read -r -p "> " value || true
+        value="$(normalize_value "$value")"
+        if [[ "$type" == "domain" ]]; then
+          if ! validate_domain "$value"; then
+            fail "Неверный домен."
+            pause
+            continue
+          fi
+        else
+          if ! validate_ip_or_cidr "$value"; then
+            fail "Неверный IP или подсеть."
+            pause
+            continue
+          fi
+        fi
+        create_backup "pre-list-change" || { pause; continue; }
+        add_unique_line "$file" "$value"
+        prompt_rebuild_after_list_change
+        pause
+        ;;
+      3)
+        read -r -p "Введите запись для удаления: " value || true
+        value="$(normalize_value "$value")"
+        create_backup "pre-list-change" || { pause; continue; }
+        remove_line "$file" "$value"
+        prompt_rebuild_after_list_change
+        pause
+        ;;
+      4)
+        echo "Введите строки. Пустая строка завершает ввод."
+        create_backup "pre-list-change" || { pause; continue; }
+        while true; do
+          read -r -p "> " value || break
+          value="$(normalize_value "$value")"
+          [[ -z "$value" ]] && break
+          if [[ "$type" == "domain" ]]; then
+            validate_domain "$value" && add_unique_line "$file" "$value" || warn "Пропущен неверный домен: $value"
+          else
+            validate_ip_or_cidr "$value" && add_unique_line "$file" "$value" || warn "Пропущен неверный IP/подсеть: $value"
+          fi
+        done
+        prompt_rebuild_after_list_change
+        pause
+        ;;
+      5)
+        create_backup "pre-list-change" || { pause; continue; }
+        dedupe_list "$file"
+        prompt_rebuild_after_list_change
+        pause
+        ;;
+      6)
+        validate_list_file "$file" "$type"
+        pause
+        ;;
+      7)
+        validate_list_file "$file" "$type"
+        generate_mikrotik_configs
+        pause
+        ;;
+      0)
+        return 0
+        ;;
+      *)
+        warn "Неверный пункт."
+        sleep 1
+        ;;
+    esac
+  done
+}
+
+emit_ip_list() {
+  local file="$1"
+  local list_name="$2"
+  local label="$3"
+  local ip
+  clean_file "$file" | while IFS= read -r ip; do
+    [[ -z "$ip" ]] && continue
+    printf '/ip firewall address-list add list=%s address=%s comment="SVNET %s %s"\n' "$list_name" "$ip" "$label" "$ip"
+  done
+}
+
+emit_dns_rules() {
+  local file="$1"
+  local list_name="$2"
+  local label="$3"
+  local domain
+  clean_file "$file" | while IFS= read -r domain; do
+    [[ -z "$domain" ]] && continue
+    printf '/ip dns static add name="%s" type=FWD forward-to=1.1.1.1 match-subdomain=yes address-list=%s comment="SVNET-DOMAIN-%s %s"\n' "$domain" "$list_name" "$label" "$domain"
+  done
+}
+
+emit_rsc_header() {
+  local title="$1"
+  local server_ip="$2"
+  cat <<RSC
+# ============================================================
+# СвободаNET Manager v$VERSION
+# $title
+# Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+# Server: $server_ip
+# VPN interface: $MIKROTIK_OVPN_IF
+# LAN: $MIKROTIK_LAN
+# ============================================================
+
+RSC
+}
+
+emit_rsc_ovpn_guard() {
+  cat <<RSC
+:if ([:len [/interface ovpn-client find name="$MIKROTIK_OVPN_IF"]] = 0) do={
+    :error "SVNET: OpenVPN interface $MIKROTIK_OVPN_IF not found. Import mikrotik.ovpn first."
+}
+
+RSC
+}
+
+emit_rsc_install_ovpn_block() {
+  local server_ip="$1"
+  cat <<RSC
+:local svnetBase "http://$server_ip:$HTTP_PORT"
+:local svnetOvpnFile "mikrotik.ovpn"
+
+:if ([:len [/interface ovpn-client find name="$MIKROTIK_OVPN_IF"]] = 0) do={
+    :log warning "SVNET: OpenVPN client not found, trying to fetch and import mikrotik.ovpn"
+    :do {
+        /tool fetch url=(\$svnetBase . "/clients/mikrotik.ovpn") dst-path=\$svnetOvpnFile keep-result=yes
+    } on-error={
+        :log warning "SVNET: cannot fetch mikrotik.ovpn"
+    }
+    :do {
+        /interface ovpn-client import-ovpn-configuration ovpn-configuration=\$svnetOvpnFile ovpn-user=ovpnuser skip-cert-import=no
+    } on-error={
+        :log warning "SVNET: automatic OpenVPN import failed. Import mikrotik.ovpn manually, then run this script again."
+    }
+}
+
+:if ([:len [/interface ovpn-client find name="$MIKROTIK_OVPN_IF"]] = 0) do={
+    :error "SVNET: OpenVPN interface $MIKROTIK_OVPN_IF is still missing"
+}
+
+/interface ovpn-client
+set [find name="$MIKROTIK_OVPN_IF"] connect-to=$server_ip protocol=$OVPN_PROTO route-nopull=yes use-peer-dns=no disabled=no
+
+RSC
+}
+
+emit_rsc_base_network() {
+  cat <<RSC
+/routing table
+:if ([:len [find name="to-vpn"]] = 0) do={ add name=to-vpn fib }
+
+/ip route
+remove [find comment="SVNET VPN default route"]
+add dst-address=0.0.0.0/0 gateway=$MIKROTIK_OVPN_IF routing-table=to-vpn distance=1 comment="SVNET VPN default route"
+
+/ip firewall nat
+remove [find comment="SVNET NAT LAN to OpenVPN"]
+remove [find comment="SVNET DIRECT WAN NAT"]
+add chain=srcnat out-interface=$MIKROTIK_WAN action=masquerade comment="SVNET DIRECT WAN NAT"
+add chain=srcnat src-address=$MIKROTIK_LAN out-interface=$MIKROTIK_OVPN_IF action=masquerade comment="SVNET NAT LAN to OpenVPN"
+
+RSC
+}
+
+emit_rsc_lists_and_dns() {
+  local server_ip="$1"
+  cat <<RSC
+/ip firewall address-list
+remove [find list="SVNET_DIRECT_IP" dynamic=no comment~"SVNET"]
+remove [find list="SVNET_FORCE_VPN_IP" dynamic=no comment~"SVNET"]
+remove [find list="SVNET_LOCAL_BYPASS" dynamic=no comment~"SVNET"]
+add list=SVNET_DIRECT_IP address=$server_ip comment="SVNET DIRECT server endpoint"
+
+RSC
+
+  emit_ip_list "$LISTS/direct-ip.txt" "SVNET_DIRECT_IP" "DIRECT-IP"
+  emit_ip_list "$LISTS/vpn-ip.txt" "SVNET_FORCE_VPN_IP" "VPN-IP"
+  emit_ip_list "$LISTS/local-bypass.txt" "SVNET_LOCAL_BYPASS" "LOCAL"
+
+  cat <<RSC
+
+/ip dns static
+remove [find comment~"SVNET-DOMAIN-DIRECT"]
+remove [find comment~"SVNET-DOMAIN-VPN"]
+RSC
+
+  emit_dns_rules "$LISTS/direct-domains.txt" "SVNET_DIRECT_IP" "DIRECT"
+  emit_dns_rules "$LISTS/vpn-domains.txt" "SVNET_FORCE_VPN_IP" "VPN"
+}
+
+emit_rsc_dns_redirect() {
+  cat <<RSC
+
+/ip firewall nat
+remove [find comment="SVNET DNS redirect UDP"]
+remove [find comment="SVNET DNS redirect TCP"]
+add chain=dstnat src-address=$MIKROTIK_LAN protocol=udp dst-port=53 action=redirect to-ports=53 comment="SVNET DNS redirect UDP"
+add chain=dstnat src-address=$MIKROTIK_LAN protocol=tcp dst-port=53 action=redirect to-ports=53 comment="SVNET DNS redirect TCP"
+
+RSC
+}
+
+emit_rsc_split_vpnfirst_mangle() {
+  cat <<RSC
+/ip firewall mangle
+remove [find comment~"SVNET-PBR"]
+remove [find comment~"SVNET MSS"]
+add chain=prerouting src-address=$MIKROTIK_LAN dst-address-list=SVNET_LOCAL_BYPASS action=accept comment="SVNET-PBR LOCAL BYPASS"
+add chain=prerouting src-address=$MIKROTIK_LAN dst-address-list=SVNET_DIRECT_IP action=accept comment="SVNET-PBR SPLIT DIRECT BYPASS"
+add chain=prerouting src-address=$MIKROTIK_LAN dst-address-list=SVNET_FORCE_VPN_IP action=mark-routing new-routing-mark=to-vpn passthrough=no comment="SVNET-PBR SPLIT FORCE VPN"
+add chain=prerouting src-address=$MIKROTIK_LAN dst-address-type=!local action=mark-routing new-routing-mark=to-vpn passthrough=no comment="SVNET-PBR SPLIT VPN-FIRST DEFAULT"
+add chain=forward src-address=$MIKROTIK_LAN out-interface=$MIKROTIK_OVPN_IF protocol=tcp tcp-flags=syn action=change-mss new-mss=1360 passthrough=yes comment="SVNET MSS clamp OpenVPN"
+
+RSC
+}
+
+emit_rsc_fullvpn_mangle() {
+  cat <<RSC
+/ip firewall mangle
+remove [find comment~"SVNET-PBR"]
+remove [find comment~"SVNET MSS"]
+add chain=prerouting src-address=$MIKROTIK_LAN dst-address-list=SVNET_LOCAL_BYPASS action=accept comment="SVNET-PBR LOCAL BYPASS"
+add chain=prerouting src-address=$MIKROTIK_LAN dst-address-type=!local action=mark-routing new-routing-mark=to-vpn passthrough=no comment="SVNET-PBR FULLVPN"
+add chain=forward src-address=$MIKROTIK_LAN out-interface=$MIKROTIK_OVPN_IF protocol=tcp tcp-flags=syn action=change-mss new-mss=1360 passthrough=yes comment="SVNET MSS clamp OpenVPN"
+
+RSC
+}
+
+emit_rsc_footer() {
+  local message="$1"
+  cat <<RSC
+/ip dns
+set allow-remote-requests=yes servers=1.1.1.1,8.8.8.8
+cache flush
+
+/ip dhcp-server network
+set [find address="$MIKROTIK_LAN"] dns-server=$MIKROTIK_LAN_DNS
+
+/ip firewall connection
+remove [find]
+
+:log warning "$message"
+RSC
+}
+
+emit_routeros_scripts() {
+  cat <<RSC
+
+/system script
+remove [find name="svnet-health-watch"]
+remove [find name="svnet-emergency-direct"]
+remove [find name="svnet-ovpn-reconnect"]
+
+add name=svnet-health-watch policy=read,write,test source={
+:local ifname "$MIKROTIK_OVPN_IF"
+:local gw "$VPN_SERVER_IP"
+:if ([:len [/interface find name=\$ifname]] = 0) do={
+    :log error "SVNET: ovpn-svnet interface not found"
+    :return
+}
+:local running [/interface get [find name=\$ifname] running]
+:if (\$running != true) do={
+    :log warning "SVNET: OpenVPN interface is not running, reconnecting"
+    /interface ovpn-client disable \$ifname
+    :delay 3
+    /interface ovpn-client enable \$ifname
+    :delay 8
+    /ip firewall connection remove [find]
+    /ip dns cache flush
+    :return
+}
+:local pingResult [/ping \$gw count=2]
+:if (\$pingResult = 0) do={
+    :log warning "SVNET: VPN gateway ping failed, reconnecting OpenVPN"
+    /interface ovpn-client disable \$ifname
+    :delay 3
+    /interface ovpn-client enable \$ifname
+    :delay 8
+    /ip firewall connection remove [find]
+    /ip dns cache flush
+} else={
+    :log info "SVNET: health OK"
+}
+}
+
+add name=svnet-emergency-direct policy=read,write,test source={
+/ip firewall mangle disable [find comment~"SVNET-PBR"]
+/ip firewall mangle disable [find comment~"SVNET MSS"]
+/ip firewall connection remove [find]
+/ip dns cache flush
+:log warning "SVNET: emergency DIRECT mode enabled"
+}
+
+add name=svnet-ovpn-reconnect policy=read,write,test source={
+/interface ovpn-client disable $MIKROTIK_OVPN_IF
+:delay 3
+/interface ovpn-client enable $MIKROTIK_OVPN_IF
+:delay 5
+/ip firewall connection remove [find]
+/ip dns cache flush
+:log warning "SVNET: OpenVPN reconnected"
+}
+
+RSC
+}
+
+gen_split_vpnfirst_rsc() {
+  local server_ip="$1"
+  emit_rsc_header "Mode: SPLIT VPN-FIRST" "$server_ip"
+  emit_rsc_ovpn_guard
+  emit_rsc_base_network
+  emit_rsc_lists_and_dns "$server_ip"
+  emit_rsc_dns_redirect
+  emit_rsc_split_vpnfirst_mangle
+  emit_rsc_footer "SVNET: Split VPN-First active"
+}
+
+gen_fullvpn_rsc() {
+  local server_ip="$1"
+  emit_rsc_header "Mode: FULL VPN" "$server_ip"
+  emit_rsc_ovpn_guard
+  emit_rsc_base_network
+  emit_rsc_lists_and_dns "$server_ip"
+  emit_rsc_dns_redirect
+  emit_rsc_fullvpn_mangle
+  emit_rsc_footer "SVNET: FULLVPN active"
+}
+
+gen_direct_rsc() {
+  emit_rsc_header "Mode: DIRECT" "$(get_server_ip)"
+  cat <<RSC
+/ip firewall mangle
+disable [find comment~"SVNET-PBR"]
+disable [find comment~"SVNET MSS"]
+
+/ip firewall connection
+remove [find]
+
+/ip dns
+cache flush
+
+:log warning "SVNET: DIRECT mode enabled"
+RSC
+}
+
+gen_scripts_rsc() {
+  emit_rsc_header "RouterOS helper scripts" "$(get_server_ip)"
+  emit_routeros_scripts
+  cat <<'RSC'
+:log warning "SVNET: helper scripts installed"
+RSC
+}
+
+gen_install_rsc() {
+  local server_ip="$1"
+  emit_rsc_header "Install / update MikroTik Split VPN-First" "$server_ip"
+  emit_rsc_install_ovpn_block "$server_ip"
+  emit_rsc_base_network
+  emit_rsc_lists_and_dns "$server_ip"
+  emit_rsc_dns_redirect
+  emit_rsc_split_vpnfirst_mangle
+  emit_routeros_scripts
+  emit_rsc_footer "SVNET: MikroTik successfully configured"
+  cat <<'RSC'
+:log warning "SVNET: Split VPN-First active"
+RSC
+}
+
+atomic_generate() {
+  local target="$1"
+  local generator="$2"
+  local server_ip="$3"
+  local tmp="${target}.tmp.$$"
+
+  mkdir -p "$(dirname "$target")"
+
+  if "$generator" "$server_ip" > "$tmp" && [[ -s "$tmp" ]]; then
+    mv -f "$tmp" "$target"
+    chmod 0644 "$target" 2>/dev/null || true
+    ok "Generated: $target"
+    return 0
+  fi
+
+  rm -f "$tmp"
+  fail "Не удалось сгенерировать непустой файл: $target"
+  return 1
+}
+
+verify_generated_rsc() {
+  local files=(
+    "$MIKROTIK/svnet-mikrotik-install.rsc"
+    "$MIKROTIK/svnet-mikrotik-split-vpnfirst.rsc"
+    "$MIKROTIK/svnet-mikrotik-fullvpn.rsc"
+    "$MIKROTIK/svnet-mikrotik-direct.rsc"
+    "$MIKROTIK/svnet-mikrotik-scripts.rsc"
+  )
+  local f bad=0
+  for f in "${files[@]}"; do
+    if [[ -s "$f" ]]; then
+      ok ".rsc не пустой: $f"
+    else
+      fail ".rsc отсутствует или пустой: $f"
+      ((bad++))
+    fi
+  done
+  return "$bad"
+}
+
+show_mikrotik_install_command() {
+  load_config
+  local server_ip
+  server_ip="$(get_server_ip)"
+  echo
+  echo "Команда для MikroTik:"
+  echo "/tool fetch url=\"http://$server_ip:$HTTP_PORT/mikrotik/svnet-mikrotik-install.rsc\" dst-path=\"svnet-mikrotik-install.rsc\"; /import file-name=\"svnet-mikrotik-install.rsc\""
+}
+
+generate_mikrotik_configs() {
+  require_root || return 1
+  load_config
+  ensure_base_dirs
+  ensure_default_lists || return 1
+
+  if [[ "$(detect_mode)" == "Safe Upgrade Mode" ]]; then
+    create_backup "pre-mikrotik-generate" || return 1
+  fi
+
+  if [[ ! -s "$CLIENTS/mikrotik.ovpn" ]]; then
+    warn "Не найден $CLIENTS/mikrotik.ovpn. Install script сможет обновить правила, но новый import OpenVPN может потребовать ручной файл."
+  elif [[ ! -s "$MIKROTIK/mikrotik.ovpn" ]]; then
+    cp -a "$CLIENTS/mikrotik.ovpn" "$MIKROTIK/mikrotik.ovpn"
+    ok "Скопирован $MIKROTIK/mikrotik.ovpn"
+  fi
+
+  local server_ip
+  server_ip="$(get_server_ip)"
+
+  status_openvpn || true
+  echo
+
+  atomic_generate "$MIKROTIK/svnet-mikrotik-install.rsc" gen_install_rsc "$server_ip" || return 1
+  atomic_generate "$MIKROTIK/svnet-mikrotik-split-vpnfirst.rsc" gen_split_vpnfirst_rsc "$server_ip" || return 1
+  atomic_generate "$MIKROTIK/svnet-mikrotik-fullvpn.rsc" gen_fullvpn_rsc "$server_ip" || return 1
+  atomic_generate "$MIKROTIK/svnet-mikrotik-direct.rsc" gen_direct_rsc "$server_ip" || return 1
+  atomic_generate "$MIKROTIK/svnet-mikrotik-scripts.rsc" gen_scripts_rsc "$server_ip" || return 1
+
+  verify_generated_rsc || return 1
+  show_mikrotik_install_command
+}
+
+check_mikrotik_connection() {
+  load_config
+  echo "Проверка MikroTik через VPN tunnel"
+  echo
+
+  if command_exists ping && ping -c 3 -W 2 "$CLIENT_IP"; then
+    ok "MikroTik отвечает на ping: $CLIENT_IP"
+  else
+    warn "MikroTik не ответил на ping: $CLIENT_IP"
+  fi
+
+  if command_exists timeout; then
+    if timeout 2 bash -c ":</dev/tcp/$CLIENT_IP/8728" >/dev/null 2>&1; then
+      ok "RouterOS API port 8728 доступен"
+    else
+      warn "RouterOS API port 8728 недоступен или отключён. Это не критично."
+    fi
+  else
+    warn "timeout не найден, API port 8728 не проверен."
+  fi
+}
+
+generate_new_mikrotik_client() {
+  require_root || return 1
+  load_config
+
+  warn "Генерация нового клиента меняет EasyRSA/OpenVPN client files."
+  warn "Если текущий MikroTik уже подключается, обычно достаточно существующего $CLIENTS/mikrotik.ovpn."
+  confirm_word "Продолжать только если нужен новый клиентский сертификат." "GENERATE" || {
+    info "Генерация клиента отменена."
+    return 0
+  }
+
+  create_backup "pre-client-generate" || return 1
+
+  if [[ ! -x "$EASYRSA_DIR/easyrsa" ]]; then
+    fail "Не найден $EASYRSA_DIR/easyrsa. Новый клиент не создан."
+    return 1
+  fi
+
+  if [[ -f "$EASYRSA_DIR/pki/issued/${CLIENT_NAME}.crt" ]]; then
+    warn "Сертификат $CLIENT_NAME уже существует. Я не буду перезаписывать его автоматически."
+    return 1
+  fi
+
+  (cd "$EASYRSA_DIR" && EASYRSA_BATCH=1 ./easyrsa build-client-full "$CLIENT_NAME" nopass) || {
+    fail "EasyRSA не смог создать клиента."
+    return 1
+  }
+
+  mkdir -p "$CLIENTS" "$MIKROTIK"
+  cat > "$CLIENTS/mikrotik.ovpn" <<OVPN
+client
+dev tun
+proto $OVPN_PROTO
+remote $(get_server_ip) $OVPN_PORT
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+cipher AES-128-GCM
+auth SHA256
+auth-nocache
+verb 3
+route-nopull
+pull-filter ignore "redirect-gateway"
+tun-mtu 1500
+mssfix 1360
+
+<ca>
+$(cat "$EASYRSA_DIR/pki/ca.crt")
+</ca>
+<cert>
+$(cat "$EASYRSA_DIR/pki/issued/${CLIENT_NAME}.crt")
+</cert>
+<key>
+$(cat "$EASYRSA_DIR/pki/private/${CLIENT_NAME}.key")
+</key>
+OVPN
+  cp -a "$CLIENTS/mikrotik.ovpn" "$MIKROTIK/mikrotik.ovpn"
+  chmod 0600 "$CLIENTS/mikrotik.ovpn" 2>/dev/null || true
+  chmod 0644 "$MIKROTIK/mikrotik.ovpn" 2>/dev/null || true
+  ok "Новый MikroTik client создан."
+}
+
+show_current_mode() {
+  echo "Текущая целевая схема по audit/export: Split VPN-First."
+  echo
+  echo "Признаки режима:"
+  echo "- Local bypass идёт напрямую."
+  echo "- Российские/direct списки идут напрямую."
+  echo "- Заблокированные списки идут через VPN."
+  echo "- Всё неизвестное по умолчанию идёт через VPN."
+  echo
+  if [[ -s "$MIKROTIK/svnet-mikrotik-split-vpnfirst.rsc" ]]; then
+    ok "Файл Split VPN-First найден: $MIKROTIK/svnet-mikrotik-split-vpnfirst.rsc"
+  else
+    warn "Файл Split VPN-First не найден или пустой."
+  fi
+}
+
+show_mikrotik_verify_commands() {
+  cat <<'TEXT'
+Команды проверки на MikroTik:
+
+/interface ovpn-client print detail where name="ovpn-svnet"
+/routing table print where name="to-vpn"
+/ip route print where comment~"SVNET"
+/ip firewall address-list print where list~"SVNET"
+/ip firewall mangle print where comment~"SVNET"
+/ip firewall nat print where comment~"SVNET"
+/ip dns static print where comment~"SVNET"
+/system script print where name~"svnet"
+/log print where message~"SVNET"
+/ping $VPN_SERVER_IP count=4
+TEXT
+}
+
+mikrotik_menu() {
+  local choice
+  while true; do
+    header
+    echo "3) MikroTik: установка / обновление / проверка"
+    echo
+    echo "1) Подготовить MikroTik конфиги"
+    echo "2) Показать команду установки для MikroTik"
+    echo "3) Проверить подключение MikroTik"
+    echo "4) Обновить MikroTik правила"
+    echo "5) Сгенерировать новый клиент MikroTik"
+    echo "6) Показать текущий режим"
+    echo "7) Показать команды проверки на MikroTik"
+    echo "0) Назад"
+    echo
+    read -r -p "Выберите пункт: " choice || return 0
+
+    case "$choice" in
+      1) generate_mikrotik_configs; pause ;;
+      2) show_mikrotik_install_command; pause ;;
+      3) check_mikrotik_connection; pause ;;
+      4)
+        warn "Автоимпорт на MikroTik не выполняется: RouterOS API по export отключён, а импорт должен подтверждаться вручную."
+        show_mikrotik_install_command
+        pause
+        ;;
+      5) generate_new_mikrotik_client; pause ;;
+      6) show_current_mode; pause ;;
+      7) show_mikrotik_verify_commands; pause ;;
+      0) return 0 ;;
+      *) warn "Неверный пункт."; sleep 1 ;;
+    esac
+  done
+}
+
+install_admin_panel_placeholder() {
+  require_root || return 1
+  load_config
+
+  echo "GUI Admin Panel"
+  echo
+  command_exists docker && ok "Docker найден: $(docker --version 2>/dev/null)" || warn "Docker не найден."
+
+  if command_exists docker && docker compose version >/dev/null 2>&1; then
+    ok "Docker Compose найден: $(docker compose version 2>/dev/null)"
+  elif command_exists docker-compose; then
+    ok "docker-compose найден: $(docker-compose --version 2>/dev/null)"
+  else
+    warn "Docker Compose не найден."
+  fi
+
+  warn "Production GUI пока не запускается без отдельного подтверждения и готового модуля."
+  confirm "Создать $ADMIN_DIR/.env.example для будущего GUI?" || return 0
+  create_backup "pre-admin-placeholder" || return 1
+
+  mkdir -p "$ADMIN_DIR"
+  if [[ ! -f "$ADMIN_DIR/.env.example" ]]; then
+    cat > "$ADMIN_DIR/.env.example" <<ENV
+# СвободаNET Admin Panel placeholder
+NODE_ENV=production
+SVNET_BASE_DIR=$BASE_DIR
+ROUTEROS_HOST=$CLIENT_IP
+ROUTEROS_API_PORT=8728
+POSTGRES_HOST=127.0.0.1
+POSTGRES_PORT=5432
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+ENV
+    ok "Создан $ADMIN_DIR/.env.example"
+  else
+    ok "$ADMIN_DIR/.env.example уже существует."
+  fi
+
+  cat <<'TEXT'
+Будущая архитектура GUI:
+- Next.js frontend
+- NestJS или Fastify backend
+- PostgreSQL
+- Redis
+- RouterOS API через VPN 10.88.0.2
+- Dashboard, устройства, списки, статистика, родительский контроль
+TEXT
+}
+
+validate_all_lists() {
+  require_root || return 1
+  ensure_default_lists || return 1
+  validate_list_file "$LISTS/direct-domains.txt" domain
+  validate_list_file "$LISTS/vpn-domains.txt" domain
+  validate_list_file "$LISTS/direct-ip.txt" ip
+  validate_list_file "$LISTS/vpn-ip.txt" ip
+  validate_list_file "$LISTS/local-bypass.txt" ip
+}
+
+show_routing_scheme() {
+  cat <<'TEXT'
+Как сейчас работает СвободаNET:
+
+1. Локальная сеть всегда работает напрямую.
+   Камеры, принтеры, роутеры, NAS и локальные панели не уходят в VPN.
+
+2. Российские сайты идут напрямую без VPN.
+   Например: Яндекс, VK, Госуслуги, банки, Ozon, Wildberries.
+
+3. Заблокированные сайты идут через VPN.
+   Например: YouTube, Instagram, Discord, Telegram, ChatGPT.
+
+4. Всё неизвестное по умолчанию идёт через VPN.
+   Это защищает от случайной утечки трафика.
+TEXT
+}
+
+routes_menu() {
+  local choice
+  while true; do
+    header
+    cat <<'TEXT'
+5) Сайты, IP и правила маршрутизации
+
+1) Российские сайты напрямую без VPN
+   Яндекс, VK, Госуслуги, банки, маркетплейсы и другие сайты,
+   которые должны открываться через обычный интернет без VPN.
+
+2) Заблокированные сайты через VPN
+   YouTube, Instagram, Discord, Telegram, Google, ChatGPT и другие сервисы,
+   которые должны всегда идти через VPN.
+
+3) Российские IP/подсети напрямую без VPN
+   Продвинутый список IP-адресов и подсетей, которые будут идти напрямую.
+   Использовать осторожно.
+
+4) IP/подсети принудительно через VPN
+   Продвинутый список IP-адресов, которые всегда должны идти через VPN.
+
+5) Локальная сеть без VPN
+   Домашние устройства, роутеры, камеры, принтеры, NAS, локальные панели.
+   Например: 192.168.50.0/24, 192.168.0.0/16.
+
+6) Проверить списки на ошибки
+   Проверяет дубли, неправильные домены, неправильные IP и пустые строки.
+
+7) Пересобрать правила для MikroTik
+   Создаёт новые файлы конфигурации для роутера.
+
+8) Применить правила на MikroTik
+   Показывает команду для MikroTik или применяет через API, если он настроен.
+
+9) Показать краткую схему работы
+   Объясняет, что идёт напрямую, что через VPN, а что остаётся локально.
+
+0) Назад
+TEXT
+    echo
+    read -r -p "Выберите пункт: " choice || return 0
+
+    case "$choice" in
+      1) manage_one_list direct_domains ;;
+      2) manage_one_list vpn_domains ;;
+      3) manage_one_list direct_ip ;;
+      4) manage_one_list vpn_ip ;;
+      5) manage_one_list local_bypass ;;
+      6) validate_all_lists; pause ;;
+      7) generate_mikrotik_configs; pause ;;
+      8)
+        warn "Автоматический импорт на MikroTik не выполняется без подтверждения на роутере."
+        show_mikrotik_install_command
+        pause
+        ;;
+      9) show_routing_scheme; pause ;;
+      0) return 0 ;;
+      *) warn "Неверный пункт."; sleep 1 ;;
+    esac
+  done
+}
+
+backup_menu() {
+  local choice
+  while true; do
+    header
+    echo "6) Backup / Restore"
+    echo
+    echo "1) Создать backup"
+    echo "2) Восстановить backup"
+    echo "3) Показать backups"
+    echo "4) Очистить старые backups"
+    echo "0) Назад"
+    echo
+    read -r -p "Выберите пункт: " choice || return 0
+    case "$choice" in
+      1) create_backup manual; pause ;;
+      2) restore_backup; pause ;;
+      3) show_backups; pause ;;
+      4) clean_old_backups; pause ;;
+      0) return 0 ;;
+      *) warn "Неверный пункт."; sleep 1 ;;
+    esac
+  done
+}
+
+server_diagnostics() {
+  load_config
+  echo "Диагностика сервера"
+  echo
+
+  echo "### OS version"
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    echo "${PRETTY_NAME:-unknown}"
+  else
+    uname -a
+  fi
+  echo
+
+  echo "### Public IP"
+  get_server_ip
+  echo
+
+  echo "### WAN interface"
+  echo "$WAN_IF"
+  command_exists ip && ip -o -4 route show to default || true
+  echo
+
+  echo "### RAM"
+  command_exists free && free -h || true
+  echo
+
+  echo "### Disk"
+  df -h / "$BASE_DIR" 2>/dev/null || df -h /
+  echo
+
+  echo "### Installed packages / versions"
+  command_exists openvpn && openvpn --version | head -n 3 || warn "openvpn не найден"
+  [[ -x "$EASYRSA_DIR/easyrsa" ]] && "$EASYRSA_DIR/easyrsa" --version 2>/dev/null | head -n 3 || warn "easy-rsa не найден в $EASYRSA_DIR"
+  command_exists iptables && iptables --version || warn "iptables не найден"
+  command_exists netfilter-persistent && netfilter-persistent --help 2>&1 | head -n 2 || warn "netfilter-persistent не найден"
+  command_exists curl && curl --version | head -n 1 || warn "curl не найден"
+  command_exists wget && wget --version | head -n 1 || warn "wget не найден"
+  echo
+
+  echo "### systemd services"
+  command_exists systemctl && systemctl --no-pager --full status "$OVPN_SERVICE" "$HTTP_SERVICE" | sed -n '1,80p' || true
+  echo
+
+  echo "### ports"
+  command_exists ss && ss -lunp | grep -E ":${OVPN_PORT}\b|openvpn" || true
+  command_exists ss && ss -ltnp | grep -E ":${HTTP_PORT}\b|python3" || true
+  echo
+
+  echo "### HTTP publish files"
+  find "$OUTPUT" -maxdepth 3 -type f -printf '%s %p\n' 2>/dev/null | sort -n || true
+  echo
+
+  echo "### /opt/svobodanet structure"
+  find "$BASE_DIR" -maxdepth 3 -printf '%M %s %p\n' 2>/dev/null | sort || true
+}
+
+update_svobodanet() {
+  require_root || return 1
+  load_config
+
+  echo "Обновить СвободаNET"
+  echo
+
+  if [[ ! -d "$REPO_DIR/.git" ]]; then
+    warn "Установка не связана с Git-репозиторием: $REPO_DIR"
+    cat <<TEXT
+Обновление вручную:
+1. Скачайте новую версию репозитория.
+2. Выполните sudo ./install.sh.
+3. Installer увидит существующую установку и предложит Safe Upgrade.
+TEXT
+    return 0
+  fi
+
+  if [[ ! -x "$REPO_DIR/update.sh" ]]; then
+    fail "Не найден исполняемый updater: $REPO_DIR/update.sh"
+    return 1
+  fi
+
+  if ! command_exists git; then
+    fail "git не найден."
+    return 1
+  fi
+
+  (cd "$REPO_DIR" && git fetch --tags --prune) || {
+    fail "git fetch не выполнен."
+    return 1
+  }
+
+  local local_version remote_version upstream
+  local_version="$VERSION"
+  upstream="$(cd "$REPO_DIR" && git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || true)"
+  remote_version="$(cd "$REPO_DIR" && git show "${upstream:-origin/HEAD}:VERSION" 2>/dev/null || true)"
+  remote_version="${remote_version:-неизвестно}"
+
+  echo "Текущая версия: $local_version"
+  echo "Версия в Git: $remote_version"
+
+  if [[ "$remote_version" == "$local_version" ]]; then
+    ok "Установлена актуальная версия."
+    return 0
+  fi
+
+  echo
+  if [[ "$remote_version" != "неизвестно" ]]; then
+    warn "Доступна новая версия: $remote_version."
+  fi
+
+  confirm "Обновить СвободаNET через Git сейчас?" || {
+    info "Обновление отменено."
+    return 0
+  }
+
+  create_backup "pre-upgrade" || return 1
+  "$REPO_DIR/update.sh"
+}
+
+project_info() {
+  load_config
+  local server_ip
+  server_ip="$(get_server_ip)"
+
+  echo "Информация о проекте"
+  echo
+  echo "Версия: $VERSION"
+  echo "Путь установки: $BASE_DIR"
+  echo "Git repo: $REPO_DIR"
+  echo "Public IP: $server_ip"
+  echo "OpenVPN: $OVPN_PROTO/$OVPN_PORT"
+  echo "HTTP publish: http://$server_ip:$HTTP_PORT/"
+  echo "MikroTik:"
+  echo "/tool fetch url=\"http://$server_ip:$HTTP_PORT/mikrotik/svnet-mikrotik-install.rsc\" dst-path=\"svnet-mikrotik-install.rsc\"; /import file-name=\"svnet-mikrotik-install.rsc\""
+  echo
+  if [[ -d "$REPO_DIR/.git" ]] && command_exists git; then
+    echo "Git remote:"
+    (cd "$REPO_DIR" && git remote -v) || true
+  else
+    warn "Git remote не найден."
+  fi
+  echo
+  echo "Документация: $REPO_DIR/docs"
+}
+
+fresh_install_notice() {
+  cat <<'TEXT'
+СвободаNET не найден в стандартных местах.
+
+Fresh Install Mode доступен только как безопасный режим подготовки.
+Этот менеджер не выполняет destructive reinstall автоматически.
+Для чистой установки OpenVPN нужен отдельный подтверждённый install-план.
+TEXT
+}
+
+main_menu() {
+  local choice mode
+  while true; do
+    load_config
+    mode="$(detect_mode)"
+    header
+    if [[ "$mode" == "Fresh Install Mode" ]]; then
+      fresh_install_notice
+      echo
+    fi
+
+    echo "1) Статус OpenVPN"
+    echo "2) Перезапустить OpenVPN"
+    echo "3) MikroTik: установка / обновление / проверка"
+    echo "4) Установить GUI Admin Panel"
+    echo "5) Сайты, IP и правила маршрутизации"
+    echo "6) Backup / Restore"
+    echo "7) Диагностика сервера"
+    echo "8) Обновить СвободаNET"
+    echo "9) Информация о проекте"
+    echo "0) Выход"
+    echo
+
+    read -r -p "Выберите пункт: " choice || exit 0
+    case "$choice" in
+      1) status_openvpn; pause ;;
+      2) restart_openvpn; pause ;;
+      3) mikrotik_menu ;;
+      4) install_admin_panel_placeholder; pause ;;
+      5) routes_menu ;;
+      6) backup_menu ;;
+      7) server_diagnostics; pause ;;
+      8) update_svobodanet; pause ;;
+      9) project_info; pause ;;
+      0) exit 0 ;;
+      *) warn "Неверный пункт."; sleep 1 ;;
+    esac
+  done
+}
+
+show_help() {
+  cat <<TEXT
+СвободаNET Manager v$VERSION
+
+Usage:
+  svnet                interactive menu
+  svnet --version      show version
+  svnet --status       run OpenVPN status checks
+  svnet --doctor       run server diagnostics
+  svnet --prepare-mikrotik
+                          generate MikroTik .rsc files
+  svnet --backup       create backup
+  svnet --update       update from Git repository
+  svnet --help         show this help
+TEXT
+}
+
+main() {
+  case "${1:-}" in
+    --version|-v)
+      echo "СвободаNET Manager v$VERSION"
+      ;;
+    --status)
+      status_openvpn
+      ;;
+    --prepare-mikrotik)
+      generate_mikrotik_configs
+      ;;
+    --doctor|--diagnostics)
+      server_diagnostics
+      ;;
+    --backup)
+      create_backup manual
+      ;;
+    --update)
+      update_svobodanet
+      ;;
+    --help|-h)
+      show_help
+      ;;
+    "")
+      main_menu
+      ;;
+    *)
+      fail "Неизвестный аргумент: $1"
+      show_help
+      return 2
+      ;;
+  esac
+}
+
+main "$@"
