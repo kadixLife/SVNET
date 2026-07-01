@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 
 BASE_DIR="/opt/svobodanet"
 CONFIG="/opt/svobodanet/config/svnet.conf"
@@ -609,6 +609,7 @@ publish_status() {
 
   echo
   echo "URL публикации:"
+  echo "URL доступны только когда $HTTP_SERVICE active."
   echo "http://$server_ip:$HTTP_PORT/clients/mikrotik.ovpn"
   echo "http://$server_ip:$HTTP_PORT/mikrotik/svnet-mikrotik-install.rsc"
   echo "http://$server_ip:$HTTP_PORT/mikrotik/svnet-mikrotik-split-vpnfirst.rsc"
@@ -1874,7 +1875,25 @@ TEXT
   UPDATE_LOCAL_COMMIT="$(git -C "$UPDATE_REPO" rev-parse --short HEAD 2>/dev/null || true)"
   UPDATE_REMOTE_COMMIT="$(git -C "$UPDATE_REPO" rev-parse --short origin/main 2>/dev/null || true)"
   UPDATE_DIRTY="$(git -C "$UPDATE_REPO" status --porcelain 2>/dev/null || true)"
+  UPDATE_VERSION_CHANGED="unknown"
+  UPDATE_COMMIT_CHANGED="unknown"
   UPDATE_STATUS="unknown"
+
+  if [[ -n "$UPDATE_LOCAL_VERSION" && "$UPDATE_REMOTE_VERSION" != "неизвестно" ]]; then
+    if [[ "$UPDATE_LOCAL_VERSION" == "$UPDATE_REMOTE_VERSION" ]]; then
+      UPDATE_VERSION_CHANGED="no"
+    else
+      UPDATE_VERSION_CHANGED="yes"
+    fi
+  fi
+
+  if [[ -n "$UPDATE_LOCAL_COMMIT_FULL" && -n "$UPDATE_REMOTE_COMMIT_FULL" ]]; then
+    if [[ "$UPDATE_LOCAL_COMMIT_FULL" == "$UPDATE_REMOTE_COMMIT_FULL" ]]; then
+      UPDATE_COMMIT_CHANGED="no"
+    else
+      UPDATE_COMMIT_CHANGED="yes"
+    fi
+  fi
 
   if [[ -z "$UPDATE_LOCAL_COMMIT_FULL" || -z "$UPDATE_REMOTE_COMMIT_FULL" ]]; then
     UPDATE_STATUS="unknown"
@@ -1894,6 +1913,16 @@ print_update_summary() {
   echo "Версия в репозитории: $UPDATE_REMOTE_VERSION"
   echo "Локальный commit: ${UPDATE_LOCAL_COMMIT:-неизвестно}"
   echo "Удалённый commit: ${UPDATE_REMOTE_COMMIT:-неизвестно}"
+  case "$UPDATE_VERSION_CHANGED" in
+    yes) echo "Версия: изменилась" ;;
+    no) echo "Версия: не изменилась" ;;
+    *) echo "Версия: не удалось сравнить" ;;
+  esac
+  case "$UPDATE_COMMIT_CHANGED" in
+    yes) echo "Commit: изменился" ;;
+    no) echo "Commit: не изменился" ;;
+    *) echo "Commit: не удалось сравнить" ;;
+  esac
   echo "Git remote: $UPDATE_REMOTE_URL"
   echo "Путь repo: $UPDATE_REPO"
   if [[ -n "$UPDATE_DIRTY" ]]; then
@@ -1942,7 +1971,11 @@ check_updates() {
       ok "Установлена актуальная версия СвободаNET."
       ;;
     update_available)
-      info "Доступна новая версия СвободаNET."
+      if [[ "$UPDATE_VERSION_CHANGED" == "no" && "$UPDATE_COMMIT_CHANGED" == "yes" ]]; then
+        info "Доступно обновление кода без изменения версии."
+      else
+        info "Доступна новая версия СвободаNET."
+      fi
       echo
       show_update_changes || true
       echo
@@ -2066,6 +2099,8 @@ update_svobodanet() {
 
   local new_version
   new_version="$(tr -d '[:space:]' < "$UPDATE_REPO/VERSION" 2>/dev/null || printf '%s' "$VERSION")"
+  local new_commit
+  new_commit="$(git -C "$UPDATE_REPO" rev-parse --short HEAD 2>/dev/null || printf '%s' "unknown")"
   update_config_version "$new_version"
   run_pending_migrations "$UPDATE_REPO" || return 1
 
@@ -2083,6 +2118,7 @@ update_svobodanet() {
   echo
   ok "СвободаNET успешно обновлён."
   echo "Версия: $new_version"
+  echo "Commit: $new_commit"
   echo "OpenVPN: $openvpn_state"
   echo "HTTP publish: $http_state"
   echo "MikroTik configs: $mt_state"
