@@ -6,7 +6,7 @@ setup_http_publish() {
   render_template "$SVNET_REPO_ROOT/templates/systemd/svnet-http.service.tpl" /etc/systemd/system/svnet-http.service \
     HTTP_PORT "$HTTP_PORT" OUTPUT_DIR "$OUTPUT_DIR"
   systemctl daemon-reload
-  systemctl enable svnet-http.service >/dev/null
-  systemctl restart svnet-http.service
+  systemctl disable svnet-http.service >/dev/null 2>&1 || true
+  systemctl start svnet-http.service
   ok "HTTP publish включён: http://$SERVER_IP:$HTTP_PORT/"
 }

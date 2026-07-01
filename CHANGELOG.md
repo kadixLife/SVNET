@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 1.0.2 - 2026-07-01
+
+- Исправлен HTTP publish: `--publish-on` теперь очищает старый listener на `8088`, перезаписывает systemd unit и проверяет HTTP 200 для обязательных файлов.
+- `svnet-http.service` теперь запускается временно с `Restart=no` и без автозапуска.
+- `--publish-off` останавливает service, отключает autostart, убирает оставшийся listener на `8088` и проверяет, что порт закрыт.
+- `--publish-status` и `--doctor` показывают service state, listener на `8088`, PID, cwd процесса и HTTP-коды URL.
+- Добавлено предупреждение о постороннем HTTP process, если service inactive, но порт `8088` всё ещё слушается.
+
 ## 1.0.1 - 2026-07-01
 
 - Исправлена установка `/opt/svobodanet/repo`: каталог теперь сохраняется как полноценный Git-репозиторий с `.git`.
