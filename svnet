@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-VERSION="1.0.4"
+VERSION="1.1.0-alpha.1"
 
 BASE_DIR="/opt/svobodanet"
 CONFIG="/opt/svobodanet/config/svnet.conf"
@@ -1643,53 +1643,158 @@ mikrotik_menu() {
   done
 }
 
-install_admin_panel_placeholder() {
+admin_module_dir() {
+  printf '%s/admin\n' "$REPO_DIR"
+}
+
+admin_compose_command() {
+  if command_exists docker && docker compose version >/dev/null 2>&1; then
+    printf '%s\n' "docker compose"
+    return 0
+  fi
+
+  if command_exists docker-compose; then
+    printf '%s\n' "docker-compose"
+    return 0
+  fi
+
+  return 1
+}
+
+run_admin_compose() {
+  local admin_repo env_file
+  local compose=()
+  admin_repo="$(admin_module_dir)"
+  env_file="$ADMIN_DIR/.env"
+
+  if command_exists docker && docker compose version >/dev/null 2>&1; then
+    compose=(docker compose)
+  elif command_exists docker-compose; then
+    compose=(docker-compose)
+  else
+    fail "Docker Compose не найден."
+    return 1
+  fi
+
+  if [[ ! -d "$admin_repo" ]]; then
+    fail "Admin module не найден: $admin_repo"
+    return 1
+  fi
+
+  if [[ ! -f "$env_file" ]]; then
+    fail "Admin .env не найден: $env_file"
+    echo "Сначала выполните: sudo svnet --admin-install"
+    return 1
+  fi
+
+  (
+    cd "$admin_repo" || exit 1
+    SVNET_ADMIN_ENV_FILE="$env_file" "${compose[@]}" --env-file "$env_file" "$@"
+  )
+}
+
+admin_install() {
   require_root || return 1
   load_config
 
-  echo "GUI Admin Panel"
+  local admin_repo env_src env_dst compose_name
+  admin_repo="$(admin_module_dir)"
+  env_src="$admin_repo/.env.example"
+  env_dst="$ADMIN_DIR/.env"
+  compose_name="$(admin_compose_command 2>/dev/null || true)"
+
+  echo "GUI Admin Panel v1.1.0-alpha"
   echo
   command_exists docker && ok "Docker найден: $(docker --version 2>/dev/null)" || warn "Docker не найден."
 
-  if command_exists docker && docker compose version >/dev/null 2>&1; then
-    ok "Docker Compose найден: $(docker compose version 2>/dev/null)"
-  elif command_exists docker-compose; then
-    ok "docker-compose найден: $(docker-compose --version 2>/dev/null)"
+  if [[ -n "$compose_name" ]]; then
+    ok "Docker Compose найден: $compose_name"
   else
     warn "Docker Compose не найден."
   fi
 
-  warn "Production GUI пока не запускается без отдельного подтверждения и готового модуля."
-  confirm "Создать $ADMIN_DIR/.env.example для будущего GUI?" || return 0
-  create_backup "pre-admin-placeholder" || return 1
-
-  mkdir -p "$ADMIN_DIR"
-  if [[ ! -f "$ADMIN_DIR/.env.example" ]]; then
-    cat > "$ADMIN_DIR/.env.example" <<ENV
-# СвободаNET Admin Panel placeholder
-NODE_ENV=production
-SVNET_BASE_DIR=$BASE_DIR
-ROUTEROS_HOST=$CLIENT_IP
-ROUTEROS_API_PORT=8728
-POSTGRES_HOST=127.0.0.1
-POSTGRES_PORT=5432
-REDIS_HOST=127.0.0.1
-REDIS_PORT=6379
-ENV
-    ok "Создан $ADMIN_DIR/.env.example"
+  if [[ -d "$admin_repo" ]]; then
+    ok "Admin module найден: $admin_repo"
   else
-    ok "$ADMIN_DIR/.env.example уже существует."
+    fail "Admin module не найден: $admin_repo"
+    echo "Проверьте, что репозиторий обновлён до версии с каталогом admin/."
+    return 1
   fi
 
-  cat <<'TEXT'
-Будущая архитектура GUI:
-- Next.js frontend
-- NestJS или Fastify backend
-- PostgreSQL
-- Redis
-- RouterOS API через VPN 10.88.0.2
-- Dashboard, устройства, списки, статистика, родительский контроль
+  mkdir -p "$ADMIN_DIR"
+
+  if [[ ! -f "$env_dst" ]]; then
+    if [[ ! -f "$env_src" ]]; then
+      fail "Example env не найден: $env_src"
+      return 1
+    fi
+    cp "$env_src" "$env_dst"
+    chmod 600 "$env_dst" 2>/dev/null || true
+    ok "Создан $env_dst"
+  else
+    ok "$env_dst уже существует, не перезаписываю."
+  fi
+
+  cat <<TEXT
+
+Что сделать дальше:
+1. Отредактируйте секреты:
+   sudo nano $env_dst
+
+2. Сгенерируйте ADMIN_PASSWORD_HASH по инструкции:
+   $admin_repo/README.md
+
+3. Проверьте состояние:
+   sudo svnet --admin-status
+
+4. Запуск только после проверки .env:
+   sudo svnet --admin-start
+
+Production GUI не запускается автоматически. OpenVPN, firewall и MikroTik configs не меняются.
 TEXT
+}
+
+admin_status() {
+  load_config
+
+  local admin_repo env_file compose_name
+  admin_repo="$(admin_module_dir)"
+  env_file="$ADMIN_DIR/.env"
+  compose_name="$(admin_compose_command 2>/dev/null || true)"
+
+  echo "GUI Admin Panel status"
+  echo
+
+  [[ -d "$admin_repo" ]] && ok "Admin module: $admin_repo" || warn "Admin module не найден: $admin_repo"
+  [[ -f "$env_file" ]] && ok "Admin env: $env_file" || warn "Admin env не найден: $env_file"
+  command_exists docker && ok "Docker: $(docker --version 2>/dev/null)" || warn "Docker не найден."
+  [[ -n "$compose_name" ]] && ok "Docker Compose: $compose_name" || warn "Docker Compose не найден."
+
+  if [[ -d "$admin_repo" && -f "$env_file" && -n "$compose_name" ]]; then
+    echo
+    run_admin_compose ps || warn "Docker Compose status недоступен."
+  fi
+
+  echo
+  echo "Документация: $admin_repo/README.md"
+  echo "Команды: sudo svnet --admin-install | --admin-start | --admin-stop"
+}
+
+admin_start() {
+  require_root || return 1
+  load_config
+
+  admin_status
+  echo
+  warn "Перед запуском проверьте ADMIN_PASSWORD_HASH, JWT_SECRET и POSTGRES_PASSWORD в $ADMIN_DIR/.env."
+  confirm "Запустить SVNET Admin Panel через Docker Compose?" || return 0
+  run_admin_compose up -d --build
+}
+
+admin_stop() {
+  require_root || return 1
+  load_config
+  run_admin_compose stop
 }
 
 validate_all_lists() {
@@ -2357,7 +2462,7 @@ main_menu() {
     menu_item "1" "Статус OpenVPN" "Проверить VPN, порт, tun-интерфейс и файлы."
     menu_item "2" "Перезапустить OpenVPN" "Сделать backup и перезапустить VPN-сервис."
     menu_item "3" "MikroTik: установка и проверка" "Подготовить файлы, команды и проверить роутер."
-    menu_item "4" "GUI Admin Panel" "Подготовить место для будущей веб-панели."
+    menu_item "4" "Установить GUI Admin Panel" "Подготовить web-панель, .env и Docker Compose без запуска."
     menu_item "5" "Сайты, IP и маршрутизация" "Настроить, что идёт напрямую, а что через VPN."
     menu_item "6" "Backup / Restore" "Создать резервную копию или восстановиться из неё."
     menu_item "7" "Диагностика сервера" "Показать систему, сервисы, порты и файлы."
@@ -2371,7 +2476,7 @@ main_menu() {
       1) status_openvpn; pause ;;
       2) restart_openvpn; pause ;;
       3) mikrotik_menu ;;
-      4) install_admin_panel_placeholder; pause ;;
+      4) admin_install; pause ;;
       5) routes_menu ;;
       6) backup_menu ;;
       7) server_diagnostics; pause ;;
@@ -2403,9 +2508,14 @@ Usage:
   svnet --publish-on   start HTTP publish for MikroTik setup
   svnet --publish-off  stop HTTP publish after MikroTik setup
   svnet --publish-status
-                          show HTTP publish state and URLs
+                           show HTTP publish state and URLs
+  svnet --admin-install
+                           prepare GUI Admin Panel env and Docker Compose
+  svnet --admin-status    show GUI Admin Panel status
+  svnet --admin-start     start GUI Admin Panel after confirmation
+  svnet --admin-stop      stop GUI Admin Panel containers
   svnet --repair-git-repo
-                          rebuild /opt/svobodanet/repo as Git repository
+                           rebuild /opt/svobodanet/repo as Git repository
   svnet --help         show this help
 TEXT
 }
@@ -2444,6 +2554,18 @@ main() {
       ;;
     --publish-status)
       publish_status
+      ;;
+    --admin-install)
+      admin_install
+      ;;
+    --admin-status)
+      admin_status
+      ;;
+    --admin-start)
+      admin_start
+      ;;
+    --admin-stop)
+      admin_stop
       ;;
     --repair-git-repo)
       repair_git_repo

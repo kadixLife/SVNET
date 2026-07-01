@@ -148,6 +148,17 @@ sudo svnet --publish-off
 
 `--publish-off` останавливает HTTP publish и не трогает OpenVPN, UDP `1194`, firewall rules и сгенерированные `.rsc` файлы.
 
+## GUI Admin Panel
+
+Начиная с `v1.1.0-alpha.1` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log и безопасный wrapper вокруг `svnet`.
+
+```bash
+sudo svnet --admin-install
+sudo svnet --admin-status
+```
+
+Подробная инструкция: [docs/ADMIN_PANEL.md](docs/ADMIN_PANEL.md). Admin Panel не меняет OpenVPN, MikroTik или firewall напрямую; dangerous actions выполняются только через allowlist CLI-команд и требуют подтверждения.
+
 ## Безопасность
 
 В Git нельзя публиковать приватные ключи и реальные клиентские конфиги. `.gitignore` исключает:

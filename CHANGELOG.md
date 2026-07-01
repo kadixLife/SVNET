@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 1.1.0-alpha.1 - 2026-07-01
+
+- Начат новый этап SVNET Admin Panel: добавлен отдельный модуль `admin/` с Docker Compose, backend API, frontend dashboard skeleton, `.env.example` и Nginx example.
+- Backend MVP использует Fastify, JWT httpOnly cookie auth, bcrypt password hash, PostgreSQL action log и allowlist wrapper для безопасного вызова `svnet`.
+- Frontend MVP использует Next.js, TypeScript, Tailwind CSS, shadcn-style локальные UI components и Recharts для read-only dashboard.
+- Добавлены endpoints для health, status, doctor, version, HTTP publish, updates, backups, lists viewer и MikroTik read-only checks.
+- Добавлена документация `docs/ADMIN_PANEL.md` и `admin/README.md`.
+- В CLI добавлены `--admin-install`, `--admin-status`, `--admin-start`, `--admin-stop`; пункт меню 4 теперь готовит GUI Admin Panel без автоматического запуска.
+
 ## 1.0.4 - 2026-07-01
 
 - Убран шумный `[WARN] HTTP ...: 000` во время retry в `--publish-on`: теперь показываются INFO-сообщения ожидания и попыток, а WARN/FAIL выводятся только после исчерпания retry.

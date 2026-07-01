@@ -9,6 +9,9 @@ while IFS= read -r file; do
   bash -n "$file" || failed=1
 done < <(find "$ROOT_DIR" -type f \( -name '*.sh' -o -name 'svnet' \) \
   ! -path '*/.git/*' \
+  ! -path '*/node_modules/*' \
+  ! -path '*/.next/*' \
+  ! -path '*/dist/*' \
   ! -path '*/output/*' \
   ! -path '*/backups/*' | sort)
 
