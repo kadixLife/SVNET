@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-VERSION="1.0.2"
+VERSION="1.0.3"
 
 BASE_DIR="/opt/svobodanet"
 CONFIG="/opt/svobodanet/config/svnet.conf"
@@ -470,7 +470,7 @@ http_publish_urls() {
 
 http_port_ss_lines() {
   command_exists ss || return 0
-  ss -H -ltnp "sport = :${HTTP_PORT}" 2>/dev/null || true
+  ss -H -ltnp 2>/dev/null | grep -E "(:|\])${HTTP_PORT}\b" || true
 }
 
 http_port_pids() {
@@ -482,6 +482,7 @@ http_port_is_listening() {
 }
 
 print_http_listener_status() {
+  local service_active="${1:-unknown}"
   echo "HTTP port $HTTP_PORT listener"
 
   if ! command_exists ss; then
@@ -493,12 +494,16 @@ print_http_listener_status() {
   local lines pids pid cwd
   lines="$(http_port_ss_lines)"
   if [[ -z "$lines" ]]; then
-    ok "port $HTTP_PORT: not listening"
+    if [[ "$service_active" == "yes" ]]; then
+      fail "$HTTP_SERVICE active, but port $HTTP_PORT is not listening"
+    else
+      ok "port $HTTP_PORT: not listening"
+    fi
     echo
     return 0
   fi
 
-  warn "port $HTTP_PORT: listening"
+  ok "port $HTTP_PORT: listening"
   echo "$lines"
   mapfile -t pids < <(printf '%s\n' "$lines" | grep -oE 'pid=[0-9]+' 2>/dev/null | cut -d= -f2 | sort -u)
 
@@ -510,10 +515,11 @@ print_http_listener_status() {
 
   for pid in "${pids[@]}"; do
     cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    echo "PID: $pid"
     if [[ -n "$cwd" ]]; then
-      echo "PID $pid cwd: $cwd"
+      echo "CWD: $cwd"
     else
-      echo "PID $pid cwd: недоступно"
+      echo "CWD: недоступно"
     fi
   done
   echo
@@ -574,6 +580,20 @@ verify_http_publish_urls() {
   return "$problems"
 }
 
+wait_for_http_publish_urls() {
+  load_config
+  local attempt
+  for attempt in {1..10}; do
+    if verify_http_publish_urls; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  fail "HTTP publish не вернул 200 OK для всех обязательных URL за 10 попыток."
+  return 1
+}
+
 status_openvpn() {
   load_config
   local problems=0
@@ -631,20 +651,19 @@ status_openvpn() {
 
   if command_exists systemctl && systemctl is-active --quiet "$HTTP_SERVICE"; then
     ok "HTTP publish service: active"
-  else
-    warn "HTTP publish service: не active"
-  fi
+    if check_http_url "http://127.0.0.1:${HTTP_PORT}/clients/mikrotik.ovpn"; then
+      ok "HTTP clients/mikrotik.ovpn: 200 OK"
+    else
+      warn "HTTP clients/mikrotik.ovpn: нет 200 OK"
+    fi
 
-  if check_http_url "http://127.0.0.1:${HTTP_PORT}/clients/mikrotik.ovpn"; then
-    ok "HTTP clients/mikrotik.ovpn: 200 OK"
+    if check_http_url "http://127.0.0.1:${HTTP_PORT}/mikrotik/svnet-mikrotik-split-vpnfirst.rsc"; then
+      ok "HTTP split-vpnfirst.rsc: 200 OK"
+    else
+      warn "HTTP split-vpnfirst.rsc: нет 200 OK"
+    fi
   else
-    warn "HTTP clients/mikrotik.ovpn: нет 200 OK"
-  fi
-
-  if check_http_url "http://127.0.0.1:${HTTP_PORT}/mikrotik/svnet-mikrotik-split-vpnfirst.rsc"; then
-    ok "HTTP split-vpnfirst.rsc: 200 OK"
-  else
-    warn "HTTP split-vpnfirst.rsc: нет 200 OK"
+    ok "HTTP publish: offline secure mode"
   fi
 
   local required=(
@@ -693,6 +712,7 @@ publish_on() {
     return 1
   fi
   ok "HTTP publish включён временно."
+  wait_for_http_publish_urls || return 1
   publish_status strict
 }
 
@@ -710,7 +730,7 @@ publish_off() {
   kill_http_port_listeners
   if http_port_is_listening; then
     fail "Порт $HTTP_PORT всё ещё слушается."
-    print_http_listener_status
+    print_http_listener_status no
     return 1
   fi
   ok "HTTP publish отключён. OpenVPN не тронут."
@@ -743,7 +763,7 @@ publish_status() {
   if [[ "$active" == "no" && "$listening" == "yes" ]]; then
     warn "Найден посторонний HTTP process на $HTTP_PORT"
   fi
-  print_http_listener_status
+  print_http_listener_status "$active"
 
   echo
   echo "URL публикации:"

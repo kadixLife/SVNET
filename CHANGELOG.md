@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 1.0.3 - 2026-07-01
+
+- Исправлена проверка listener на `8088` в `--publish-status`: порт определяется через полный вывод `ss -H -ltnp`.
+- `--publish-status` теперь выводит `[OK] port 8088: listening`, PID и CWD процесса, а при active service без listener показывает FAIL.
+- `--publish-on` ждёт до 10 попыток, пока обязательные HTTP URL начнут отдавать `200 OK`.
+- `svnet --status` больше не предупреждает об offline HTTP publish: выключенная публикация считается secure mode.
+
 ## 1.0.2 - 2026-07-01
 
 - Исправлен HTTP publish: `--publish-on` теперь очищает старый listener на `8088`, перезаписывает systemd unit и проверяет HTTP 200 для обязательных файлов.
