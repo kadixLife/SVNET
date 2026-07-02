@@ -1,6 +1,6 @@
 # SVNET Admin Panel
 
-SVNET Admin Panel v1.1.0-alpha.3 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall напрямую. Все dangerous actions выполняются только через allowlist команд `svnet`.
+SVNET Admin Panel v1.1.0-alpha.4 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall без явной команды. Все dangerous actions выполняются только через allowlist команд `svnet`.
 
 ## Автоматическая установка
 
@@ -49,20 +49,27 @@ sudo svnet
 8) Удалить Admin Panel
 9) Показать логи
 10) Сбросить пароль администратора
+11) Настроить доступ из домашней сети
 0) Назад
 ```
 
 ## Первичная настройка
 
-После установки откройте:
+После установки на самом VPS доступен локальный URL:
 
 ```text
 http://127.0.0.1:3000/setup
 ```
 
+Если включён доступ из домашней сети, ту же настройку можно открыть с домашнего Wi-Fi:
+
+```text
+http://svnet.local/setup
+```
+
 Введите setup token, который `svnet --admin-install` показал после первого создания `.env`, затем создайте admin username/password. Пароль не хранится в `.env`: backend хеширует его bcrypt и сохраняет hash в PostgreSQL.
 
-## SSH tunnel
+## Доступ из домашней сети
 
 Admin Panel по умолчанию слушает только localhost VPS:
 
@@ -71,7 +78,46 @@ Admin Panel по умолчанию слушает только localhost VPS:
 127.0.0.1:3001
 ```
 
-Откройте безопасный туннель с вашего ПК:
+Это режим `local-only`. Он безопасен после установки, но не удобен для обычного использования дома.
+
+Основной пользовательский сценарий - открыть панель как роутер:
+
+```text
+http://svnet.local
+```
+
+Для этого включите режим `vpn-lan`:
+
+```bash
+sudo svnet --admin-enable-lan-access
+sudo svnet --admin-access-status
+```
+
+Команда проверит OpenVPN, `tun-svnet` с IP `10.88.0.1`, запущенные admin containers, nginx и firewall. Если nginx не установлен, будет запрос подтверждения на установку через `apt`.
+
+Что настраивается:
+
+- nginx reverse proxy слушает только `10.88.0.1:80`;
+- frontend проксируется на `127.0.0.1:3000`;
+- backend `/api/` проксируется на `127.0.0.1:3001/api/`;
+- firewall rule разрешает TCP `80` только на интерфейсе `tun-svnet` из VPN subnet;
+- MikroTik `.rsc` получает DNS static `svnet.local -> 10.88.0.1`.
+
+Public IP и `0.0.0.0:80` не должны слушать Admin Panel. Если `svnet --admin-access-status` видит wildcard/public listener, это warning, который нужно исправить перед production.
+
+Отключить домашний доступ:
+
+```bash
+sudo svnet --admin-disable-lan-access
+```
+
+Контейнеры при этом не останавливаются. Локальный доступ `127.0.0.1:3000` остаётся.
+
+Режим `public-https` зарезервирован на будущее и сейчас отключён.
+
+## SSH tunnel для разработчика
+
+SSH tunnel больше не основной пользовательский flow. Используйте его только как developer fallback:
 
 ```bash
 ssh -L 3000:127.0.0.1:3000 root@SERVER_IP
@@ -87,21 +133,10 @@ http://127.0.0.1:3000
 
 Admin Panel управляет backup, update и HTTP publish. Даже с авторизацией её нельзя бездумно публиковать на `0.0.0.0`. Безопасный порядок:
 
-1. По умолчанию используйте SSH tunnel.
-2. Если нужен постоянный доступ, поставьте Nginx reverse proxy.
-3. Подключите HTTPS.
-4. Ограничьте доступ firewall/IP allowlist.
-
-Пример Nginx:
-
-```bash
-sudo cp /opt/svobodanet/repo/admin/nginx/svnet-admin.conf.example /etc/nginx/sites-available/svnet-admin.conf
-sudo ln -s /etc/nginx/sites-available/svnet-admin.conf /etc/nginx/sites-enabled/svnet-admin.conf
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-HTTPS auto-setup пока не входит в MVP.
+1. По умолчанию держать `local-only`.
+2. Для дома включать `vpn-lan`: `10.88.0.1:80` через OpenVPN tunnel.
+3. Не открывать TCP `80` на public IP.
+4. HTTPS/public-доступ рассматривать отдельно только в будущем режиме `public-https`.
 
 ## Lifecycle CLI
 
@@ -116,6 +151,9 @@ sudo svnet --admin-reinstall
 sudo svnet --admin-remove
 sudo svnet --admin-logs
 sudo svnet --admin-reset-password
+sudo svnet --admin-access-status
+sudo svnet --admin-enable-lan-access
+sudo svnet --admin-disable-lan-access
 ```
 
 `--admin-stop` выполняет `docker compose down`, но не удаляет volumes, `.env` и PostgreSQL данные.

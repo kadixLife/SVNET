@@ -150,14 +150,45 @@ sudo svnet --publish-off
 
 ## GUI Admin Panel
 
-Начиная с `v1.1.0-alpha.3` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log, first-run setup wizard и безопасный wrapper вокруг `svnet`.
+Начиная с `v1.1.0-alpha.4` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log, first-run setup wizard и безопасный wrapper вокруг `svnet`.
 
 ```bash
 sudo svnet --admin-install
 sudo svnet --admin-status
+sudo svnet --admin-access-status
 ```
 
-`--admin-install` сам проверяет Docker/Compose, генерирует секреты, создаёт `.env`, предлагает запуск и показывает SSH tunnel. Подробная инструкция: [docs/ADMIN_PANEL.md](docs/ADMIN_PANEL.md). Admin Panel не меняет OpenVPN, MikroTik или firewall напрямую; dangerous actions выполняются только через allowlist CLI-команд и требуют подтверждения.
+`--admin-install` сам проверяет Docker/Compose, генерирует секреты, создаёт `.env`, предлагает запуск и показывает локальный URL для VPS: `http://127.0.0.1:3000`.
+
+По умолчанию Admin Panel работает в режиме `local-only`: только `127.0.0.1`, без доступа из интернета и без доступа из домашней сети.
+
+Чтобы открыть панель из домашней Wi-Fi/LAN сети через уже поднятый OpenVPN tunnel:
+
+```bash
+sudo svnet --admin-enable-lan-access
+```
+
+После включения откройте на телефоне или ПК дома:
+
+```text
+http://svnet.local
+```
+
+Команда включает nginx reverse proxy только на `10.88.0.1:80`, добавляет firewall allow rule только для `tun-svnet`/VPN и добавляет DNS static `svnet.local -> 10.88.0.1` в генерируемые MikroTik `.rsc`. Public IP не должен слушать TCP `80`.
+
+Отключить домашний доступ, не останавливая контейнеры:
+
+```bash
+sudo svnet --admin-disable-lan-access
+```
+
+SSH tunnel остаётся только developer fallback:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 root@SERVER_IP
+```
+
+Подробная инструкция: [docs/ADMIN_PANEL.md](docs/ADMIN_PANEL.md). Admin Panel не меняет OpenVPN и MikroTik без явной команды; dangerous actions выполняются только через allowlist CLI-команд и требуют подтверждения.
 
 ## Безопасность
 

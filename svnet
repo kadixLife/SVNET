@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-VERSION="1.1.0-alpha.3"
+VERSION="1.1.0-alpha.4"
 
 BASE_DIR="/opt/svobodanet"
 CONFIG="/opt/svobodanet/config/svnet.conf"
@@ -14,6 +14,11 @@ CLI="/usr/local/bin/svnet"
 REPO_DIR="${SVNET_REPO_DIR:-/opt/svobodanet/repo}"
 SVNET_GIT_URL="${SVNET_GIT_URL:-https://github.com/kadixLife/SVNET.git}"
 ADMIN_DIR="/opt/svobodanet-admin"
+ADMIN_ACCESS_HOST="svnet.local"
+ADMIN_HTTP_PORT="80"
+ADMIN_NGINX_AVAILABLE="/etc/nginx/sites-available/svnet-admin.conf"
+ADMIN_NGINX_ENABLED="/etc/nginx/sites-enabled/svnet-admin.conf"
+ADMIN_FIREWALL_COMMENT="SVNET Admin LAN access"
 
 OVPN_SERVICE="openvpn-server@svnet"
 HTTP_SERVICE="svnet-http.service"
@@ -163,6 +168,8 @@ load_config() {
   MIKROTIK_LAN_DNS="${MIKROTIK_LAN_DNS:-192.168.50.1}"
   HTTP_PORT="${HTTP_PORT:-8088}"
   SVNET_GIT_URL="${SVNET_GIT_URL:-https://github.com/kadixLife/SVNET.git}"
+  ADMIN_ACCESS_HOST="${ADMIN_ACCESS_HOST:-svnet.local}"
+  ADMIN_HTTP_PORT="${ADMIN_HTTP_PORT:-80}"
 }
 
 systemd_unit_exists() {
@@ -1223,6 +1230,14 @@ RSC
 
   emit_dns_rules "$LISTS/direct-domains.txt" "SVNET_DIRECT_IP" "DIRECT"
   emit_dns_rules "$LISTS/vpn-domains.txt" "SVNET_FORCE_VPN_IP" "VPN"
+
+  cat <<RSC
+
+/ip dns static remove [find name="$ADMIN_ACCESS_HOST"]
+/ip dns static add name="$ADMIN_ACCESS_HOST" address=$VPN_SERVER_IP comment="SVNET Admin Panel"
+:log info "SVNET Admin DNS configured: $ADMIN_ACCESS_HOST -> $VPN_SERVER_IP"
+:put "SVNET Admin Panel: http://$ADMIN_ACCESS_HOST"
+RSC
 }
 
 emit_rsc_dns_redirect() {
@@ -1963,6 +1978,419 @@ admin_http_code() {
   fi
 }
 
+admin_lan_url() {
+  load_config
+  printf 'http://%s\n' "$ADMIN_ACCESS_HOST"
+}
+
+admin_access_mode() {
+  if [[ -e "$ADMIN_NGINX_ENABLED" ]]; then
+    printf '%s\n' "vpn-lan"
+  else
+    printf '%s\n' "local-only"
+  fi
+}
+
+admin_http80_ss_lines() {
+  command_exists ss || return 0
+  ss -H -ltnp 2>/dev/null | grep -E "(:|\])${ADMIN_HTTP_PORT}[[:space:]]" || true
+}
+
+admin_vpn_http_listener_lines() {
+  admin_http80_ss_lines | grep -F "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}" || true
+}
+
+admin_public_http_listener_lines() {
+  local server_ip lines
+  server_ip="$(get_server_ip)"
+  lines="$(admin_http80_ss_lines)"
+  {
+    printf '%s\n' "$lines" | grep -E "(^|[[:space:]])(0\.0\.0\.0:${ADMIN_HTTP_PORT}|\*:${ADMIN_HTTP_PORT}|\[::\]:${ADMIN_HTTP_PORT}|:::${ADMIN_HTTP_PORT})[[:space:]]" || true
+    if [[ -n "$server_ip" && "$server_ip" != "SERVER_IP" && "$server_ip" != "$VPN_SERVER_IP" ]]; then
+      printf '%s\n' "$lines" | grep -F "${server_ip}:${ADMIN_HTTP_PORT}" || true
+    fi
+  } | sort -u
+}
+
+admin_http80_pids() {
+  admin_http80_ss_lines | grep -oE 'pid=[0-9]+' 2>/dev/null | cut -d= -f2 | sort -u
+}
+
+admin_print_http80_processes() {
+  local lines pids pid cwd
+  lines="$(admin_http80_ss_lines)"
+  [[ -n "$lines" ]] || return 0
+
+  echo "$lines"
+  mapfile -t pids < <(printf '%s\n' "$lines" | grep -oE 'pid=[0-9]+' 2>/dev/null | cut -d= -f2 | sort -u)
+  for pid in "${pids[@]}"; do
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    echo "PID: $pid"
+    echo "CWD: ${cwd:-недоступно}"
+  done
+}
+
+admin_nginx_active() {
+  command_exists systemctl && systemctl is-active --quiet nginx
+}
+
+admin_ensure_nginx() {
+  if command_exists nginx; then
+    ok "nginx: installed"
+    return 0
+  fi
+
+  warn "nginx не найден."
+  if ! command_exists apt-get; then
+    fail "apt-get не найден. Установите nginx вручную."
+    return 1
+  fi
+
+  confirm "Установить nginx автоматически через apt?" || return 1
+  info "Устанавливаю nginx..."
+  DEBIAN_FRONTEND=noninteractive apt-get update || return 1
+  DEBIAN_FRONTEND=noninteractive apt-get install -y nginx || return 1
+  command_exists systemctl && systemctl stop nginx >/dev/null 2>&1 || true
+  ok "nginx установлен."
+}
+
+admin_disable_nginx_default_site() {
+  local default_site backup
+  default_site="/etc/nginx/sites-enabled/default"
+
+  if [[ ! -e "$default_site" ]]; then
+    return 0
+  fi
+
+  warn "Найден nginx default site. Он часто слушает 0.0.0.0:80 и может открыть public HTTP."
+  confirm "Отключить default site для безопасного доступа только через VPN?" || return 1
+
+  backup="/etc/nginx/sites-enabled/default.svnet-disabled_$(date +%F_%H-%M-%S)"
+  mv -f "$default_site" "$backup" || return 1
+  ok "nginx default site отключён: $backup"
+}
+
+admin_write_nginx_config() {
+  local frontend_port backend_port
+  frontend_port="$(admin_port FRONTEND_PORT 3000)"
+  backend_port="$(admin_port BACKEND_PORT 3001)"
+
+  mkdir -p "$(dirname "$ADMIN_NGINX_AVAILABLE")" "$(dirname "$ADMIN_NGINX_ENABLED")"
+  cat > "$ADMIN_NGINX_AVAILABLE" <<NGINX
+server {
+    listen ${VPN_SERVER_IP}:${ADMIN_HTTP_PORT};
+    server_name ${ADMIN_ACCESS_HOST};
+
+    client_max_body_size 2m;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:${backend_port}/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection "";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:${frontend_port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection "";
+    }
+}
+NGINX
+
+  ln -sfn "$ADMIN_NGINX_AVAILABLE" "$ADMIN_NGINX_ENABLED"
+  ok "nginx config: $ADMIN_NGINX_AVAILABLE"
+}
+
+admin_reload_nginx() {
+  nginx -t || {
+    fail "nginx config test failed"
+    return 1
+  }
+
+  if command_exists systemctl; then
+    systemctl enable nginx >/dev/null 2>&1 || true
+    if admin_nginx_active; then
+      systemctl reload nginx || systemctl restart nginx || return 1
+    else
+      systemctl start nginx || return 1
+    fi
+  else
+    nginx -s reload 2>/dev/null || nginx || return 1
+  fi
+
+  ok "nginx reloaded"
+}
+
+persist_iptables_rules() {
+  if command_exists netfilter-persistent; then
+    netfilter-persistent save >/dev/null 2>&1 || warn "netfilter-persistent save не выполнен."
+    return 0
+  fi
+
+  if command_exists iptables-save && [[ -d /etc/iptables ]]; then
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || warn "Не удалось сохранить /etc/iptables/rules.v4."
+    return 0
+  fi
+
+  warn "iptables rule применено, но persistence не найден. После reboot может потребоваться повторить команду."
+}
+
+admin_firewall_add_lan_rule() {
+  local rule
+  if ! command_exists iptables; then
+    fail "iptables не найден."
+    return 1
+  fi
+
+  rule=(-i "$OVPN_IF" -s "$VPN_CIDR" -p tcp --dport "$ADMIN_HTTP_PORT" -m comment --comment "$ADMIN_FIREWALL_COMMENT" -j ACCEPT)
+
+  if iptables -C INPUT "${rule[@]}" 2>/dev/null; then
+    ok "iptables INPUT $OVPN_IF tcp/$ADMIN_HTTP_PORT from $VPN_CIDR: есть"
+  else
+    iptables -I INPUT 1 "${rule[@]}" || return 1
+    ok "iptables INPUT $OVPN_IF tcp/$ADMIN_HTTP_PORT from $VPN_CIDR: добавлено"
+  fi
+
+  persist_iptables_rules
+}
+
+admin_firewall_remove_lan_rule() {
+  local rule removed=0
+  if ! command_exists iptables; then
+    warn "iptables не найден."
+    return 0
+  fi
+
+  rule=(-i "$OVPN_IF" -s "$VPN_CIDR" -p tcp --dport "$ADMIN_HTTP_PORT" -m comment --comment "$ADMIN_FIREWALL_COMMENT" -j ACCEPT)
+  while iptables -C INPUT "${rule[@]}" 2>/dev/null; do
+    iptables -D INPUT "${rule[@]}" || return 1
+    removed=1
+  done
+
+  if [[ "$removed" == "1" ]]; then
+    ok "iptables INPUT $OVPN_IF tcp/$ADMIN_HTTP_PORT from $VPN_CIDR: удалено"
+    persist_iptables_rules
+  else
+    ok "iptables INPUT $OVPN_IF tcp/$ADMIN_HTTP_PORT: SVNET rule не найдено"
+  fi
+}
+
+admin_check_openvpn_ready() {
+  local problems=0
+
+  if command_exists systemctl && systemctl is-active --quiet "$OVPN_SERVICE"; then
+    ok "OpenVPN service: active"
+  else
+    fail "OpenVPN service: не active"
+    ((problems++))
+  fi
+
+  if command_exists ip && ip -4 -o addr show dev "$OVPN_IF" 2>/dev/null | grep -q " ${VPN_SERVER_IP}/"; then
+    ok "$OVPN_IF: $VPN_SERVER_IP"
+  else
+    fail "$OVPN_IF не подтверждает IP $VPN_SERVER_IP"
+    ((problems++))
+  fi
+
+  return "$problems"
+}
+
+admin_check_containers_running() {
+  local service state problems=0
+
+  [[ -f "$(admin_env_file)" ]] || {
+    fail "Admin .env не найден. Выполните: sudo svnet --admin-install"
+    return 1
+  }
+
+  admin_ensure_docker || return 1
+  admin_ensure_compose || return 1
+  admin_compose_config_check || return 1
+
+  for service in postgres backend frontend; do
+    state="$(admin_container_state "$service")"
+    if [[ "$state" == "running" ]]; then
+      ok "$service: running"
+    else
+      fail "$service: $state"
+      ((problems++))
+    fi
+  done
+
+  return "$problems"
+}
+
+admin_mikrotik_dns_generated() {
+  grep -q "name=\"${ADMIN_ACCESS_HOST}\" address=${VPN_SERVER_IP}" "$MIKROTIK/svnet-mikrotik-install.rsc" 2>/dev/null
+}
+
+admin_print_mikrotik_apply_hint() {
+  echo
+  echo "MikroTik DNS update:"
+  echo "1. Временно включите публикацию, если будете импортировать файл через RouterOS fetch:"
+  echo "   sudo svnet --publish-on"
+  echo "2. На MikroTik выполните команду импорта:"
+  show_mikrotik_install_command
+  echo "3. После импорта отключите публикацию:"
+  echo "   sudo svnet --publish-off"
+}
+
+admin_verify_lan_access() {
+  local code public_lines problems=0
+
+  code="$(http_status_code "http://${VPN_SERVER_IP}")"
+  if [[ "$code" == "200" ]]; then
+    ok "curl http://${VPN_SERVER_IP}: 200 OK"
+  else
+    fail "curl http://${VPN_SERVER_IP}: HTTP $code"
+    ((problems++))
+  fi
+
+  if [[ -n "$(admin_vpn_http_listener_lines)" ]]; then
+    ok "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}: listening"
+  else
+    fail "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}: not listening"
+    ((problems++))
+  fi
+
+  public_lines="$(admin_public_http_listener_lines)"
+  if [[ -n "$public_lines" ]]; then
+    fail "Public IP/${ADMIN_HTTP_PORT}: найден listener. Admin Panel не должен слушать public HTTP."
+    printf '%s\n' "$public_lines"
+    ((problems++))
+  else
+    ok "Public IP:${ADMIN_HTTP_PORT}: not listening"
+  fi
+
+  return "$problems"
+}
+
+admin_access_status() {
+  load_config
+
+  local mode frontend_code backend_code public_lines
+  mode="$(admin_access_mode)"
+  frontend_code="$(http_status_code "$(admin_frontend_url)")"
+  backend_code="$(http_status_code "$(admin_backend_url)")"
+
+  echo "SVNET Admin Panel access status"
+  echo
+  echo "Mode: $mode"
+  echo "Access modes:"
+  echo "- local-only: only 127.0.0.1, default after install"
+  echo "- vpn-lan: ${VPN_SERVER_IP}:${ADMIN_HTTP_PORT} + 127.0.0.1"
+  echo "- public-https: reserved for future, disabled"
+  echo
+
+  echo "Local access:"
+  echo "- Frontend 127.0.0.1:$(admin_port FRONTEND_PORT 3000): $frontend_code"
+  echo "- Backend 127.0.0.1:$(admin_port BACKEND_PORT 3001): $backend_code"
+  echo
+
+  echo "Home network access:"
+  echo "- URL: $(admin_lan_url)"
+  echo "- VPN gateway: http://${VPN_SERVER_IP}"
+
+  if command_exists systemctl && systemctl is-active --quiet nginx; then
+    ok "nginx: active"
+  else
+    if [[ "$mode" == "vpn-lan" ]]; then
+      fail "nginx: inactive"
+    else
+      ok "nginx: inactive"
+    fi
+  fi
+
+  if [[ -n "$(admin_vpn_http_listener_lines)" ]]; then
+    ok "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}: listening"
+    admin_print_http80_processes
+  else
+    if [[ "$mode" == "vpn-lan" ]]; then
+      fail "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}: not listening"
+    else
+      ok "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}: not listening"
+    fi
+  fi
+
+  public_lines="$(admin_public_http_listener_lines)"
+  if [[ -n "$public_lines" ]]; then
+    warn "Найден listener на public/wildcard :${ADMIN_HTTP_PORT}. Это небезопасно для Admin Panel."
+    printf '%s\n' "$public_lines"
+  else
+    ok "Public IP:${ADMIN_HTTP_PORT}: not listening"
+  fi
+
+  if admin_mikrotik_dns_generated; then
+    ok "MikroTik DNS static: ${ADMIN_ACCESS_HOST} -> ${VPN_SERVER_IP} есть в generated .rsc"
+  else
+    warn "MikroTik DNS static required: ${ADMIN_ACCESS_HOST} -> ${VPN_SERVER_IP}. Выполните sudo svnet --prepare-mikrotik или --admin-enable-lan-access."
+  fi
+}
+
+admin_enable_lan_access() {
+  require_root || return 1
+  load_config
+
+  echo "Enable SVNET Admin Panel access from home network"
+  echo
+  info "Admin Panel не будет открыт на public IP. Nginx должен слушать только ${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}."
+
+  admin_check_openvpn_ready || return 1
+  admin_check_containers_running || return 1
+  admin_ensure_nginx || return 1
+  admin_disable_nginx_default_site || return 1
+  admin_write_nginx_config || return 1
+  admin_reload_nginx || return 1
+  admin_firewall_add_lan_rule || return 1
+
+  info "Обновляю MikroTik .rsc, чтобы добавить DNS ${ADMIN_ACCESS_HOST} -> ${VPN_SERVER_IP}."
+  generate_mikrotik_configs || return 1
+  admin_print_mikrotik_apply_hint
+
+  echo
+  admin_verify_lan_access || return 1
+  echo
+  ok "Admin Panel доступна из домашней сети: $(admin_lan_url)"
+  ok "Developer local access сохранён: $(admin_frontend_url)"
+}
+
+admin_disable_lan_access() {
+  require_root || return 1
+  load_config
+
+  echo "Disable SVNET Admin Panel home network access"
+  echo
+
+  if [[ -e "$ADMIN_NGINX_ENABLED" ]]; then
+    rm -f "$ADMIN_NGINX_ENABLED"
+    ok "nginx site disabled: $ADMIN_NGINX_ENABLED"
+  else
+    ok "nginx site already disabled"
+  fi
+
+  if command_exists nginx; then
+    nginx -t || return 1
+    if command_exists systemctl && admin_nginx_active; then
+      systemctl reload nginx || systemctl restart nginx || return 1
+    else
+      nginx -s reload 2>/dev/null || true
+    fi
+  fi
+
+  admin_firewall_remove_lan_rule || return 1
+  ok "Admin containers не остановлены. Local access сохранён: $(admin_frontend_url)"
+  echo
+  admin_access_status
+}
+
 admin_container_state() {
   local service="$1" id state
   if ! command_exists docker || ! admin_compose_command >/dev/null 2>&1; then
@@ -1985,12 +2413,16 @@ admin_print_access() {
   server_ip="$(get_server_ip)"
   frontend_url="$(admin_frontend_url)"
   echo "Доступ:"
-  echo "$frontend_url"
+  echo "Для разработчика на VPS: $frontend_url"
   echo
-  echo "Безопасный доступ с ПК:"
+  echo "Для домашней сети: отключено по умолчанию."
+  echo "Включить: sudo svnet --admin-enable-lan-access"
+  echo "После включения откройте: $(admin_lan_url)"
+  echo
+  echo "Developer fallback через SSH tunnel:"
   echo "ssh -L 3000:127.0.0.1:3000 root@$server_ip"
   echo
-  echo "Потом откройте:"
+  echo "Потом на ПК откройте:"
   echo "http://127.0.0.1:3000"
 }
 
@@ -2056,7 +2488,7 @@ admin_install() {
 
   local dry_run="${1:-}"
 
-  echo "GUI Admin Panel v1.1.0-alpha.3"
+  echo "GUI Admin Panel v$VERSION"
   echo
 
   admin_check_prereqs "$dry_run" || return 1
@@ -2120,7 +2552,9 @@ admin_status() {
   echo
 
   echo "Access:"
-  echo "$(admin_frontend_url)"
+  echo "- Local: $(admin_frontend_url)"
+  echo "- Home network: $(admin_lan_url) ($(admin_access_mode))"
+  echo "- Enable home network: sudo svnet --admin-enable-lan-access"
 }
 
 admin_start() {
@@ -2246,6 +2680,27 @@ admin_reset_password() {
   return "$rc"
 }
 
+admin_access_menu() {
+  local choice
+  while true; do
+    header
+    menu_title "GUI Admin Panel: доступ из домашней сети"
+    menu_item "1" "Проверить доступ" "Показать режим, локальные URL, nginx, порт 80, public bind и DNS для svnet.local."
+    menu_item "2" "Включить доступ из домашней сети" "Открыть Admin Panel через VPN как http://svnet.local, без public IP."
+    menu_item "3" "Отключить доступ из домашней сети" "Убрать nginx site и firewall rule, но оставить локальные admin containers."
+    menu_item "0" "Назад" "Вернуться в меню GUI Admin Panel."
+    echo
+    read -r -p "Выберите пункт: " choice || return 0
+    case "$choice" in
+      1) admin_access_status; pause ;;
+      2) admin_enable_lan_access; pause ;;
+      3) admin_disable_lan_access; pause ;;
+      0) return 0 ;;
+      *) warn "Неверный пункт."; sleep 1 ;;
+    esac
+  done
+}
+
 admin_menu() {
   local choice
   while true; do
@@ -2261,6 +2716,7 @@ admin_menu() {
     menu_item "8" "Удалить Admin Panel" "Остановить containers; удаление volumes/data только по отдельному подтверждению."
     menu_item "9" "Показать логи" "Показать последние 120 строк docker compose logs."
     menu_item "10" "Сбросить пароль администратора" "Задать новый пароль и обновить bcrypt hash в PostgreSQL."
+    menu_item "11" "Настроить доступ из домашней сети" "Включить или отключить http://svnet.local через VPN tunnel, без public IP."
     menu_item "0" "Назад" "Вернуться в главное меню."
     echo
     read -r -p "Выберите пункт: " choice || return 0
@@ -2275,6 +2731,7 @@ admin_menu() {
       8) admin_remove; pause ;;
       9) admin_logs; pause ;;
       10) admin_reset_password; pause ;;
+      11) admin_access_menu ;;
       0) return 0 ;;
       *) warn "Неверный пункт."; sleep 1 ;;
     esac
@@ -2509,6 +2966,10 @@ server_diagnostics() {
 
   echo "### HTTP publish diagnostics"
   publish_status
+  echo
+
+  echo "### Admin Panel access diagnostics"
+  admin_access_status
   echo
 
   echo "### HTTP publish files"
@@ -3007,6 +3468,12 @@ Usage:
   svnet --admin-logs      show Admin Panel logs
   svnet --admin-reset-password
                            reset Admin Panel admin password
+  svnet --admin-access-status
+                           show Admin Panel local/VPN-LAN access status
+  svnet --admin-enable-lan-access
+                           enable Admin Panel on http://svnet.local via VPN only
+  svnet --admin-disable-lan-access
+                           disable Admin Panel VPN-LAN access, keep local containers
   svnet --repair-git-repo
                            rebuild /opt/svobodanet/repo as Git repository
   svnet --help         show this help
@@ -3077,6 +3544,15 @@ main() {
       ;;
     --admin-reset-password)
       admin_reset_password
+      ;;
+    --admin-access-status)
+      admin_access_status
+      ;;
+    --admin-enable-lan-access)
+      admin_enable_lan_access
+      ;;
+    --admin-disable-lan-access)
+      admin_disable_lan_access
       ;;
     --repair-git-repo)
       repair_git_repo

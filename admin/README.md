@@ -1,4 +1,4 @@
-# SVNET Admin Panel v1.1.0-alpha.3
+# SVNET Admin Panel v1.1.0-alpha.4
 
 Первый MVP веб-панели для СвободаNET. Модуль живёт отдельно от стабильного CLI и вызывает только allowlist-команды `svnet`.
 
@@ -15,7 +15,7 @@
 sudo svnet --admin-install
 ```
 
-Если Docker или Docker Compose plugin отсутствуют, `svnet` предложит установить их автоматически через `apt`. После подготовки скрипт предложит сразу запустить containers и покажет URL, SSH tunnel и setup token.
+Если Docker или Docker Compose plugin отсутствуют, `svnet` предложит установить их автоматически через `apt`. После подготовки скрипт предложит сразу запустить containers и покажет локальный URL, способ включить домашний доступ и setup token.
 
 ## Первичная настройка
 
@@ -41,7 +41,28 @@ sudo svnet --admin-logs
 sudo svnet --admin-reset-password
 ```
 
-Панель слушает только `127.0.0.1:3000` и `127.0.0.1:3001`. Для доступа с ПК используйте SSH tunnel:
+Панель после установки слушает только `127.0.0.1:3000` и `127.0.0.1:3001`.
+
+Основной домашний доступ включается отдельно через OpenVPN tunnel:
+
+```bash
+sudo svnet --admin-enable-lan-access
+sudo svnet --admin-access-status
+```
+
+После этого с домашней Wi-Fi/LAN сети откройте:
+
+```text
+http://svnet.local
+```
+
+Отключить домашний доступ, не останавливая контейнеры:
+
+```bash
+sudo svnet --admin-disable-lan-access
+```
+
+SSH tunnel остаётся только developer fallback:
 
 ```bash
 ssh -L 3000:127.0.0.1:3000 root@SERVER_IP
@@ -56,6 +77,7 @@ ssh -L 3000:127.0.0.1:3000 root@SERVER_IP
 - HTTP publish должен оставаться в offline secure mode после настройки MikroTik.
 - `.env` не хранится в Git и должен иметь права `600`.
 - Admin Panel не открывается на `0.0.0.0` по умолчанию.
+- Доступ из домашней сети работает только через nginx на `10.88.0.1:80` и firewall rule для `tun-svnet`.
 
 ## Что пока read-only
 

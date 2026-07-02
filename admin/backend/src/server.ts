@@ -202,7 +202,7 @@ async function registerRoutes() {
   app.get("/api/health", async () => ({
     ok: true,
     service: "svnet-admin-backend",
-    version: "1.1.0-alpha.3"
+    version: "1.1.0-alpha.4"
   }));
 
   app.get("/api/setup/status", async () => ({

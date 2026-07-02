@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 1.1.0-alpha.4 - 2026-07-02
+
+- Добавлены режимы доступа Admin Panel: `local-only` по умолчанию, `vpn-lan` для домашней сети через OpenVPN tunnel и зарезервированный `public-https` как будущий отключённый режим.
+- Добавлены CLI-команды `svnet --admin-access-status`, `svnet --admin-enable-lan-access`, `svnet --admin-disable-lan-access` и пункт меню `Настроить доступ из домашней сети`.
+- `--admin-enable-lan-access` настраивает nginx reverse proxy только на `10.88.0.1:80`, проверяет OpenVPN/tun/admin containers, добавляет firewall allow rule только для `tun-svnet`/VPN и предупреждает о wildcard/public listener.
+- `--admin-disable-lan-access` отключает nginx site и удаляет своё firewall rule, не останавливая admin containers и сохраняя локальный доступ `127.0.0.1:3000`.
+- В генерируемые MikroTik `.rsc` добавлена DNS static запись `svnet.local -> 10.88.0.1` и понятные RouterOS log/put сообщения для Admin Panel.
+- Документация обновлена: основной домашний flow теперь `http://svnet.local`, SSH tunnel оставлен только как developer fallback.
+
 ## 1.1.0-alpha.3 - 2026-07-02
 
 - Исправлена совместимость Admin Panel Docker Compose с legacy `docker-compose v1.29.2`: удалено top-level `name`, добавлено `version: "3.8"`, `depends_on.condition` заменён на простой `depends_on`.
