@@ -148,9 +148,16 @@ sudo svnet --publish-off
 
 `--publish-off` останавливает HTTP publish и не трогает OpenVPN, UDP `1194`, firewall rules и сгенерированные `.rsc` файлы.
 
+Если старый KADI service снова поднимает `0.0.0.0:8088`, выполните cleanup:
+
+```bash
+sudo svnet --cleanup-legacy-services
+sudo svnet --publish-off
+```
+
 ## GUI Admin Panel
 
-Начиная с `v1.1.0-alpha.5` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log, first-run setup wizard и безопасный wrapper вокруг `svnet`.
+Начиная с `v1.1.0-alpha.6` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log, first-run setup wizard и безопасный wrapper вокруг `svnet`.
 
 ```bash
 sudo svnet --admin-install

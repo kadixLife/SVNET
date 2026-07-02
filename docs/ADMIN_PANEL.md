@@ -1,6 +1,6 @@
 # SVNET Admin Panel
 
-SVNET Admin Panel v1.1.0-alpha.5 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall без явной команды. Все dangerous actions выполняются только через allowlist команд `svnet`.
+SVNET Admin Panel v1.1.0-alpha.6 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall без явной команды. Все dangerous actions выполняются только через allowlist команд `svnet`.
 
 ## Автоматическая установка
 
@@ -163,6 +163,7 @@ sudo svnet --admin-access-status
 sudo svnet --admin-enable-lan-access
 sudo svnet --admin-disable-lan-access
 sudo svnet --admin-fix-nginx-bind
+sudo svnet --cleanup-legacy-services
 ```
 
 `--admin-stop` выполняет `docker compose down`, но не удаляет volumes, `.env` и PostgreSQL данные.
@@ -218,6 +219,7 @@ sudo svnet --admin-remove
 - Restore backup не запускается из UI.
 - Редактирование списков не входит в v1.1.
 - HTTP publish должен оставаться выключенным после настройки MikroTik.
+- Старый `kadi-routeros-http.service` нужно отключить через `sudo svnet --cleanup-legacy-services`, если он снова поднимает `0.0.0.0:8088`.
 - Backend не принимает произвольные shell-команды.
 - Docker install всегда требует подтверждение.
 

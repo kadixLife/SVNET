@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-VERSION="1.1.0-alpha.5"
+VERSION="1.1.0-alpha.6"
 
 BASE_DIR="/opt/svobodanet"
 CONFIG="/opt/svobodanet/config/svnet.conf"
@@ -26,6 +26,7 @@ HTTP_SERVICE="svnet-http.service"
 OVPN_SERVER_CONF="/etc/openvpn/server/svnet.conf"
 HTTP_SERVICE_FILE="/etc/systemd/system/svnet-http.service"
 EASYRSA_DIR="/etc/openvpn/easy-rsa"
+LEGACY_KADI_HTTP_SERVICE="kadi-routeros-http.service"
 
 PROJECT_NAME="СвободаNET"
 SERVER_IP=""
@@ -481,12 +482,67 @@ http_port_ss_lines() {
   ss -H -ltnp 2>/dev/null | grep -E "(:|\])${HTTP_PORT}\b" || true
 }
 
+http_port_wildcard_listener_lines() {
+  http_port_ss_lines | grep -E "(^|[[:space:]])(0\.0\.0\.0:${HTTP_PORT}|\*:${HTTP_PORT}|\[::\]:${HTTP_PORT}|:::${HTTP_PORT})([[:space:]]|$)" || true
+}
+
+http_port_public_listener_lines() {
+  local server_ip lines
+  server_ip="$(get_server_ip)"
+  lines="$(http_port_ss_lines)"
+  {
+    http_port_wildcard_listener_lines
+    if [[ -n "$server_ip" && "$server_ip" != "SERVER_IP" && "$server_ip" != "$VPN_SERVER_IP" ]]; then
+      printf '%s\n' "$lines" | grep -F "${server_ip}:${HTTP_PORT}" || true
+    fi
+  } | sort -u
+}
+
 http_port_pids() {
   http_port_ss_lines | grep -oE 'pid=[0-9]+' 2>/dev/null | cut -d= -f2 | sort -u
 }
 
 http_port_is_listening() {
   [[ -n "$(http_port_ss_lines)" ]]
+}
+
+pid_systemd_unit() {
+  local pid="$1" unit
+
+  if [[ -r "/proc/$pid/cgroup" ]]; then
+    unit="$(grep -oE '[A-Za-z0-9_.@-]+\.service' "/proc/$pid/cgroup" 2>/dev/null | tail -n1 || true)"
+    if [[ -n "$unit" ]]; then
+      printf '%s\n' "$unit"
+      return 0
+    fi
+  fi
+
+  if command_exists systemctl; then
+    unit="$(systemctl status "$pid" --no-pager 2>/dev/null | grep -m1 -oE '[A-Za-z0-9_.@-]+\.service' || true)"
+    if [[ -n "$unit" ]]; then
+      printf '%s\n' "$unit"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+http_public_ip_code() {
+  local server_ip code
+  server_ip="$(get_server_ip)"
+  if [[ -z "$server_ip" || "$server_ip" == "SERVER_IP" || "$server_ip" == "$VPN_SERVER_IP" ]]; then
+    printf '%s\n' "skipped"
+    return 0
+  fi
+
+  if ! command_exists curl; then
+    printf '%s\n' "curl-missing"
+    return 0
+  fi
+
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -I --connect-timeout 3 --max-time 5 "http://${server_ip}:${HTTP_PORT}" 2>/dev/null || true)"
+  printf '%s\n' "${code:-000}"
 }
 
 print_http_listener_status() {
@@ -499,7 +555,7 @@ print_http_listener_status() {
     return 0
   fi
 
-  local lines pids pid cwd
+  local lines pids pid cwd unit
   lines="$(http_port_ss_lines)"
   if [[ -z "$lines" ]]; then
     if [[ "$service_active" == "yes" ]]; then
@@ -524,7 +580,13 @@ print_http_listener_status() {
 
   for pid in "${pids[@]}"; do
     cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    unit="$(pid_systemd_unit "$pid" 2>/dev/null || true)"
     echo "PID: $pid"
+    if [[ -n "$unit" ]]; then
+      echo "Systemd unit: $unit"
+    else
+      echo "Systemd unit: unknown"
+    fi
     if [[ -n "$cwd" ]]; then
       echo "CWD: $cwd"
     else
@@ -554,6 +616,122 @@ kill_http_port_listeners() {
       kill -9 "$pid" 2>/dev/null || true
     fi
   done
+}
+
+known_legacy_service_candidates() {
+  {
+    printf '%s\n' "$LEGACY_KADI_HTTP_SERVICE"
+    if command_exists systemctl; then
+      systemctl list-unit-files --no-legend 'kadi*.service' 'kadi-*.service' 2>/dev/null | awk '{print $1}'
+      systemctl list-units --all --no-legend 'kadi*.service' 'kadi-*.service' 2>/dev/null | awk '{print $1}'
+    fi
+  } | sort -u
+}
+
+systemd_unit_known() {
+  local unit="$1"
+  command_exists systemctl || return 1
+  systemctl list-unit-files --no-legend "$unit" 2>/dev/null | awk '{print $1}' | grep -Fxq "$unit" && return 0
+  systemctl list-units --all --no-legend "$unit" 2>/dev/null | awk '{print $1}' | grep -Fxq "$unit"
+}
+
+is_known_legacy_http_unit() {
+  local unit="$1"
+  [[ "$unit" == "$LEGACY_KADI_HTTP_SERVICE" ]]
+}
+
+disable_legacy_service_unit() {
+  local unit="$1"
+  command_exists systemctl || {
+    warn "systemctl не найден, не могу отключить $unit."
+    return 1
+  }
+
+  warn "Найден старый KADI service: $unit"
+  confirm "Отключить старый KADI HTTP service $unit?" || return 1
+
+  systemctl stop "$unit" >/dev/null 2>&1 || true
+  systemctl disable "$unit" >/dev/null 2>&1 || true
+  systemctl mask "$unit" >/dev/null 2>&1 || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  ok "Legacy service disabled and masked: $unit"
+}
+
+cleanup_http_port_legacy_units() {
+  local pids pid unit changed=0 declined=0
+  mapfile -t pids < <(http_port_pids)
+
+  for pid in "${pids[@]}"; do
+    unit="$(pid_systemd_unit "$pid" 2>/dev/null || true)"
+    [[ -n "$unit" ]] || continue
+    if is_known_legacy_http_unit "$unit"; then
+      if disable_legacy_service_unit "$unit"; then
+        changed=1
+      else
+        declined=1
+      fi
+    fi
+  done
+
+  if [[ "$changed" == "1" ]]; then
+    sleep 1
+  fi
+
+  [[ "$declined" == "0" ]]
+}
+
+verify_http_publish_public_closed() {
+  local code public_lines problems=0
+
+  if http_port_is_listening; then
+    warn "ss показывает listener на $HTTP_PORT:"
+    http_port_ss_lines
+  else
+    ok "ss: port $HTTP_PORT not listening"
+  fi
+
+  public_lines="$(http_port_public_listener_lines)"
+  if [[ -n "$public_lines" ]]; then
+    fail "HTTP publish ${HTTP_PORT}: public/wildcard listener найден"
+    printf '%s\n' "$public_lines"
+    ((problems++))
+  else
+    ok "HTTP publish ${HTTP_PORT}: no public/wildcard listener"
+  fi
+
+  code="$(http_public_ip_code)"
+  case "$code" in
+    000) ok "curl public IP:${HTTP_PORT}: refused/timeout" ;;
+    skipped) warn "curl public IP:${HTTP_PORT}: skipped, public IP не определён" ;;
+    curl-missing) warn "curl public IP:${HTTP_PORT}: curl не найден" ;;
+    *) fail "curl public IP:${HTTP_PORT}: HTTP $code"; ((problems++)) ;;
+  esac
+
+  return "$problems"
+}
+
+cleanup_legacy_services() {
+  require_root || return 1
+  load_config
+
+  local services unit found=0
+  echo "Cleanup legacy KADI services"
+  echo
+  mapfile -t services < <(known_legacy_service_candidates)
+
+  for unit in "${services[@]}"; do
+    [[ -n "$unit" ]] || continue
+    systemd_unit_known "$unit" || continue
+    found=1
+    disable_legacy_service_unit "$unit" || true
+  done
+
+  if [[ "$found" == "0" ]]; then
+    ok "Known legacy KADI services не найдены."
+  fi
+
+  echo
+  verify_http_publish_public_closed || return 1
 }
 
 write_http_publish_service() {
@@ -744,6 +922,9 @@ publish_off() {
 
   systemctl stop "$HTTP_SERVICE" >/dev/null 2>&1 || true
   systemctl disable "$HTTP_SERVICE" >/dev/null 2>&1 || true
+  if http_port_is_listening; then
+    cleanup_http_port_legacy_units || true
+  fi
   kill_http_port_listeners
   if http_port_is_listening; then
     fail "Порт $HTTP_PORT всё ещё слушается."
@@ -751,6 +932,7 @@ publish_off() {
     return 1
   fi
   ok "HTTP publish отключён. OpenVPN не тронут."
+  verify_http_publish_public_closed || true
   publish_status
 }
 
@@ -2074,6 +2256,41 @@ admin_warn_http_publish_listener() {
   fi
 }
 
+admin_prepare_http_publish_before_lan_access() {
+  load_config
+  local public_lines
+
+  if ! http_port_is_listening; then
+    ok "HTTP publish ${HTTP_PORT}: offline or not listening"
+    return 0
+  fi
+
+  public_lines="$(http_port_public_listener_lines)"
+  if [[ -z "$public_lines" ]]; then
+    warn "HTTP publish ${HTTP_PORT} слушает, но public/wildcard listener не найден. Admin LAN access от 8088 не зависит."
+    print_http_listener_status no
+    return 0
+  fi
+
+  warn "HTTP publish ${HTTP_PORT} слушает public/wildcard. Это не нужно для Admin LAN access."
+  print_http_listener_status no
+
+  if command_exists systemctl && systemctl is-active --quiet "$HTTP_SERVICE"; then
+    confirm "Отключить временный HTTP publish перед продолжением?" || return 1
+    publish_off || return 1
+  else
+    cleanup_http_port_legacy_units || true
+  fi
+
+  if [[ -n "$(http_port_public_listener_lines)" ]]; then
+    fail "HTTP publish ${HTTP_PORT} всё ещё слушает public/wildcard. Выполните sudo svnet --cleanup-legacy-services или отключите старый service вручную."
+    print_http_listener_status no
+    return 1
+  fi
+
+  verify_http_publish_public_closed || return 1
+}
+
 admin_ensure_nginx() {
   if command_exists nginx; then
     ok "nginx: installed"
@@ -2505,7 +2722,7 @@ admin_enable_lan_access() {
   echo "Enable SVNET Admin Panel access from home network"
   echo
   info "Admin Panel не будет открыт на public IP. Nginx должен слушать только ${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}."
-  admin_warn_http_publish_listener
+  admin_prepare_http_publish_before_lan_access || return 1
 
   admin_check_openvpn_ready || return 1
   admin_check_containers_running || return 1
@@ -3677,6 +3894,8 @@ Usage:
   svnet --publish-off  stop HTTP publish after MikroTik setup
   svnet --publish-status
                            show HTTP publish state and URLs
+  svnet --cleanup-legacy-services
+                           disable known old KADI systemd services safely
   svnet --admin-install
                            install GUI Admin Panel lifecycle automatically
   svnet --admin-install --dry-run
@@ -3739,6 +3958,9 @@ main() {
       ;;
     --publish-status)
       publish_status
+      ;;
+    --cleanup-legacy-services)
+      cleanup_legacy_services
       ;;
     --admin-install)
       admin_install "${2:-}"

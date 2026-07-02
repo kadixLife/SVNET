@@ -1,4 +1,4 @@
-# SVNET Admin Panel v1.1.0-alpha.5
+# SVNET Admin Panel v1.1.0-alpha.6
 
 Первый MVP веб-панели для СвободаNET. Модуль живёт отдельно от стабильного CLI и вызывает только allowlist-команды `svnet`.
 
@@ -81,6 +81,7 @@ ssh -L 3000:127.0.0.1:3000 root@SERVER_IP
 - `publish-on`, `publish-off`, `safe update`, `backup create` требуют confirmation.
 - Dangerous actions пишутся в PostgreSQL `action_log`.
 - HTTP publish должен оставаться в offline secure mode после настройки MikroTik.
+- Старые KADI HTTP services можно безопасно отключить командой `sudo svnet --cleanup-legacy-services`.
 - `.env` не хранится в Git и должен иметь права `600`.
 - Admin Panel не открывается на `0.0.0.0` по умолчанию.
 - Доступ из домашней сети работает только через nginx на `10.88.0.1:80` и firewall rule для `tun-svnet`.

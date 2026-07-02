@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 1.1.0-alpha.6 - 2026-07-02
+
+- `svnet --publish-status` теперь показывает systemd unit для PID, который слушает HTTP publish port `8088`.
+- `svnet --publish-off` умеет обнаруживать legacy `kadi-routeros-http.service`, который перезапускает `python3 -m http.server 8088 --bind 0.0.0.0`, и предлагает stop/disable/mask этого unit без удаления данных.
+- Добавлена команда `svnet --cleanup-legacy-services` для безопасного отключения известных старых KADI systemd services.
+- После cleanup проверяются `ss` listener на `8088` и `curl http://PUBLIC_IP:8088`; успешное состояние - refused/timeout.
+- `svnet --admin-enable-lan-access` теперь останавливает процесс установки, если `8088` слушает public/wildcard, и предлагает отключить legacy service до продолжения.
+
 ## 1.1.0-alpha.5 - 2026-07-02
 
 - Исправлен критичный security bug Admin Panel LAN access: `default*` nginx sites больше не переименовываются внутри `/etc/nginx/sites-enabled`, а переносятся в `/etc/nginx/svnet-disabled/`.
