@@ -1,4 +1,4 @@
-# SVNET Admin Panel v1.1.0-alpha.7
+# SVNET Admin Panel v1.1.0-alpha.8
 
 Первый MVP веб-панели для СвободаNET. Модуль живёт отдельно от стабильного CLI и вызывает только allowlist-команды `svnet`.
 
@@ -46,6 +46,7 @@ sudo svnet --admin-remove
 sudo svnet --admin-logs
 sudo svnet --admin-reset-password
 sudo svnet --admin-reset-setup
+sudo svnet --admin-cleanup-docker
 ```
 
 Панель после установки слушает только `127.0.0.1:3000` и `127.0.0.1:3001`.
@@ -111,6 +112,22 @@ sudo svnet --admin-reset-setup
 ```
 
 `--admin-reset-setup` требует подтверждение словом `RESET_SETUP`, удаляет admin users из PostgreSQL и не удаляет `.env`, Docker volumes, OpenVPN, MikroTik configs или firewall.
+
+## Safe update и нехватка места
+
+```bash
+sudo svnet --admin-update
+```
+
+`--admin-update` сначала проверяет свободное место, затем выполняет `docker compose build backend frontend`. Старые containers не останавливаются до успешной сборки. Только после успешного build выполняется `docker compose up -d --force-recreate`.
+
+Если свободного места меньше 2 GB, выполните:
+
+```bash
+sudo svnet --admin-cleanup-docker
+```
+
+Cleanup очищает apt/npm cache, Docker builder cache, stopped containers, unused networks и dangling images. Docker volumes с PostgreSQL данными не удаляются.
 
 ## Что пока read-only
 

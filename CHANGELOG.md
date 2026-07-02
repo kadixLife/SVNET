@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 1.1.0-alpha.8 - 2026-07-02
+
+- `svnet --admin-update` больше не останавливает старые Admin Panel containers до успешной сборки новых backend/frontend images.
+- Добавлен disk preflight перед rebuild: `df -h /`, `docker system df`, минимум 2 GB свободного места на `/`.
+- Добавлена команда `svnet --admin-cleanup-docker` для безопасной очистки apt/npm cache, Docker builder cache, stopped containers, unused networks и dangling images без удаления Docker volumes.
+- После `--admin-update` проверяются backend/frontend container state и HTTP health `200`; при ошибке показываются последние logs и команда завершается с FAIL.
+- Проверка Admin HTTP health теперь использует явный HTTP code (`200`, `404`, `500`, `000`) без ложного OK при пустом ответе curl.
+
 ## 1.1.0-alpha.7 - 2026-07-02
 
 - Переделан first-run setup Admin Panel: `/setup` больше не требует `ADMIN_SETUP_TOKEN`, первый администратор создаётся прямо в браузере.

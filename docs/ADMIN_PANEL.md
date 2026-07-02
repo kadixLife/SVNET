@@ -1,6 +1,6 @@
 # SVNET Admin Panel
 
-SVNET Admin Panel v1.1.0-alpha.7 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall без явной команды. Все dangerous actions выполняются только через allowlist команд `svnet`.
+SVNET Admin Panel v1.1.0-alpha.8 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall без явной команды. Все dangerous actions выполняются только через allowlist команд `svnet`.
 
 ## Автоматическая установка
 
@@ -174,6 +174,7 @@ sudo svnet --admin-remove
 sudo svnet --admin-logs
 sudo svnet --admin-reset-password
 sudo svnet --admin-reset-setup
+sudo svnet --admin-cleanup-docker
 sudo svnet --admin-access-status
 sudo svnet --admin-enable-lan-access
 sudo svnet --admin-disable-lan-access
@@ -184,6 +185,31 @@ sudo svnet --cleanup-legacy-services
 `--admin-stop` выполняет `docker compose down`, но не удаляет volumes, `.env` и PostgreSQL данные.
 
 `--admin-remove` требует два подтверждения. По умолчанию данные не удаляются; удаление volumes и `/opt/svobodanet-admin` спрашивается отдельно.
+
+## Safe update и disk cleanup
+
+```bash
+sudo svnet --admin-update
+```
+
+Команда не делает `docker compose down` перед сборкой. Порядок безопасный:
+
+1. Проверить свободное место: `df -h /`.
+2. Показать Docker usage: `docker system df`.
+3. Проверить `docker compose config`.
+4. Собрать новые images: `docker compose build backend frontend`.
+5. Только если build успешен: `docker compose up -d --force-recreate`.
+6. Проверить `backend`/`frontend` running и health `200`.
+
+Если build не прошёл, старые containers не останавливаются. Если после recreate health не прошёл, команда показывает последние logs и завершается с FAIL.
+
+Если свободного места меньше 2 GB:
+
+```bash
+sudo svnet --admin-cleanup-docker
+```
+
+Cleanup очищает apt cache, npm cache, Docker builder cache, stopped containers, unused networks и dangling images. Docker volumes по умолчанию не удаляются.
 
 ## Как сбросить пароль
 

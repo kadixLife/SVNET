@@ -2,7 +2,7 @@
 
 СвободаNET - это менеджер для Ubuntu VPS и MikroTik. Он поднимает OpenVPN на сервере, готовит конфиги для MikroTik и помогает настроить split-routing: часть трафика идёт напрямую, часть через VPN.
 
-Текущая версия проекта: `1.1.0-alpha.7`.
+Текущая версия проекта: `1.1.0-alpha.8`.
 
 Важно: базовый CLI уже используется как рабочая основа. Web Admin Panel находится в alpha-ветке и должна включаться осознанно.
 
@@ -454,6 +454,7 @@ sudo svnet --admin-stop
 | `sudo svnet --admin-logs` | Показывает логи Admin Panel. |
 | `sudo svnet --admin-reset-password` | Сбрасывает пароль администратора. |
 | `sudo svnet --admin-reset-setup` | Developer recovery: удаляет admin users и снова открывает `/setup` после подтверждения. |
+| `sudo svnet --admin-cleanup-docker` | Освобождает место без удаления Docker volumes. |
 | `sudo svnet --admin-enable-lan-access` | Включает доступ к панели из домашней сети через VPN. |
 | `sudo svnet --admin-disable-lan-access` | Выключает LAN access к панели. |
 | `sudo svnet --admin-fix-nginx-bind` | Исправляет небезопасный nginx bind на public/wildcard `:80`. |
@@ -512,6 +513,15 @@ curl -I --connect-timeout 3 http://PUBLIC_IP
 - TCP `8088` не слушается на public/wildcard.
 - Если включена Admin Panel, `sudo svnet --admin-access-status` не показывает `0.0.0.0:80`, `[::]:80` или `PUBLIC_IP:80`.
 - Старые KADI services отключены, если они снова поднимали `8088`.
+
+Если при Admin Panel rebuild не хватает места:
+
+```bash
+sudo svnet --admin-cleanup-docker
+sudo svnet --admin-update
+```
+
+Cleanup не удаляет Docker volumes с PostgreSQL данными.
 
 ## Разработка и проверки
 

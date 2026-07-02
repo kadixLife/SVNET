@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-VERSION="1.1.0-alpha.7"
+VERSION="1.1.0-alpha.8"
 
 BASE_DIR="/opt/svobodanet"
 CONFIG="/opt/svobodanet/config/svnet.conf"
@@ -2142,12 +2142,63 @@ admin_http_code() {
     printf 'curl-missing\n'
     return 1
   }
-  code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || true)"
-  if [[ "$code" == "200" ]]; then
-    printf '200\n'
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)"
+  if [[ "$code" =~ ^[0-9]{3}$ ]]; then
+    printf '%s\n' "$code"
   else
-    printf 'failed\n'
+    printf '000\n'
   fi
+}
+
+admin_disk_free_kb() {
+  command_exists df || return 1
+  df -Pk / 2>/dev/null | awk 'NR == 2 {print $4}'
+}
+
+admin_format_kb() {
+  local kb="$1"
+  if command_exists numfmt; then
+    numfmt --from-unit=1024 --to=iec --suffix=B "$kb" 2>/dev/null && return 0
+  fi
+  printf '%s KB\n' "$kb"
+}
+
+admin_disk_preflight() {
+  local min_free_kb=$((2 * 1024 * 1024))
+  local free_kb free_human
+
+  echo "Disk preflight"
+  echo
+
+  if command_exists df; then
+    df -h /
+  else
+    fail "df не найден, не могу проверить свободное место."
+    return 1
+  fi
+
+  echo
+  if command_exists docker; then
+    docker system df || true
+  else
+    warn "docker не найден, docker system df пропущен."
+  fi
+
+  free_kb="$(admin_disk_free_kb || true)"
+  if [[ -z "$free_kb" || ! "$free_kb" =~ ^[0-9]+$ ]]; then
+    fail "Не удалось определить свободное место на /."
+    return 1
+  fi
+
+  free_human="$(admin_format_kb "$free_kb")"
+  if (( free_kb < min_free_kb )); then
+    fail "Свободного места на / меньше 2 GB: $free_human"
+    echo "Запустите безопасную очистку:"
+    echo "  sudo svnet --admin-cleanup-docker"
+    return 1
+  fi
+
+  ok "Свободное место на /: $free_human"
 }
 
 admin_lan_url() {
@@ -2876,6 +2927,34 @@ admin_wait_health() {
   return 1
 }
 
+admin_verify_runtime() {
+  local problems=0 state
+
+  state="$(admin_container_state backend)"
+  if [[ "$state" == "running" ]]; then
+    ok "backend container: running"
+  else
+    fail "backend container: $state"
+    ((problems++))
+  fi
+
+  state="$(admin_container_state frontend)"
+  if [[ "$state" == "running" ]]; then
+    ok "frontend container: running"
+  else
+    fail "frontend container: $state"
+    ((problems++))
+  fi
+
+  admin_wait_health || ((problems++))
+  return "$problems"
+}
+
+admin_show_runtime_logs() {
+  warn "Последние логи backend/frontend:"
+  run_admin_compose logs --tail=120 backend frontend || true
+}
+
 admin_check_prereqs() {
   local dry_run="${1:-}" admin_repo
   admin_repo="$(admin_module_dir)"
@@ -3017,10 +3096,74 @@ admin_update() {
   require_root || return 1
   load_config
   warn "Будут обновлены только admin containers. OpenVPN, MikroTik и firewall не трогаются."
+  admin_disk_preflight || return 1
   admin_compose_config_check || return 1
-  run_admin_compose pull || true
-  run_admin_compose up -d --build || return 1
-  admin_wait_health || true
+  info "Собираю новые backend/frontend images без остановки старых containers."
+  if ! run_admin_compose build backend frontend; then
+    fail "Admin Panel build failed. Старые containers не останавливались."
+    echo "Если причина в свободном месте, выполните:"
+    echo "  sudo svnet --admin-cleanup-docker"
+    return 1
+  fi
+
+  info "Build OK. Пересоздаю admin containers."
+  run_admin_compose up -d --force-recreate || {
+    fail "docker compose up failed после успешной сборки."
+    admin_show_runtime_logs
+    return 1
+  }
+
+  if ! admin_verify_runtime; then
+    fail "Admin Panel обновлена не полностью: health check не прошёл."
+    admin_show_runtime_logs
+    return 1
+  fi
+
+  ok "Admin Panel обновлена."
+}
+
+admin_cleanup_docker() {
+  require_root || return 1
+  load_config
+
+  warn "Будет выполнена безопасная очистка cache/stopped/dangling данных."
+  warn "Docker volumes с PostgreSQL данными НЕ удаляются."
+  confirm "Запустить очистку apt/npm/docker cache без удаления volumes?" || return 0
+
+  echo
+  echo "До очистки:"
+  command_exists df && df -h / || true
+  command_exists docker && docker system df || true
+
+  if command_exists apt-get; then
+    apt-get clean || true
+    ok "apt cache очищен."
+  else
+    warn "apt-get не найден, apt cache пропущен."
+  fi
+
+  if command_exists npm; then
+    npm cache clean --force >/dev/null 2>&1 || true
+    ok "npm cache очищен."
+  else
+    warn "npm не найден, npm cache пропущен."
+  fi
+
+  if command_exists docker; then
+    docker builder prune -f || true
+    docker container prune -f || true
+    docker network prune -f || true
+    docker image prune -f || true
+    ok "Docker builder cache, stopped containers, unused networks и dangling images очищены."
+    ok "Docker volumes не удалялись."
+  else
+    warn "docker не найден, Docker cleanup пропущен."
+  fi
+
+  echo
+  echo "После очистки:"
+  command_exists df && df -h / || true
+  command_exists docker && docker system df || true
 }
 
 admin_backup_data_dir() {
@@ -3162,7 +3305,8 @@ admin_menu() {
     menu_item "9" "Показать логи" "Показать последние 120 строк docker compose logs."
     menu_item "10" "Сбросить пароль администратора" "Задать новый пароль и обновить bcrypt hash в PostgreSQL."
     menu_item "11" "Сбросить первичную настройку" "Developer recovery: удалить admin users и снова открыть /setup."
-    menu_item "12" "Настроить доступ из домашней сети" "Включить или отключить http://svnet.local через VPN tunnel, без public IP."
+    menu_item "12" "Очистить Docker/cache" "Освободить место: apt/npm cache, builder cache, stopped containers, networks, dangling images."
+    menu_item "13" "Настроить доступ из домашней сети" "Включить или отключить http://svnet.local через VPN tunnel, без public IP."
     menu_item "0" "Назад" "Вернуться в главное меню."
     echo
     read -r -p "Выберите пункт: " choice || return 0
@@ -3178,7 +3322,8 @@ admin_menu() {
       9) admin_logs; pause ;;
       10) admin_reset_password; pause ;;
       11) admin_reset_setup; pause ;;
-      12) admin_access_menu ;;
+      12) admin_cleanup_docker; pause ;;
+      13) admin_access_menu ;;
       0) return 0 ;;
       *) warn "Неверный пункт."; sleep 1 ;;
     esac
@@ -3919,6 +4064,8 @@ Usage:
                            reset Admin Panel admin password
   svnet --admin-reset-setup
                            developer recovery: reopen first-run setup
+  svnet --admin-cleanup-docker
+                           safely free disk space without removing Docker volumes
   svnet --admin-access-status
                            show Admin Panel local/VPN-LAN access status
   svnet --admin-enable-lan-access
@@ -4003,6 +4150,9 @@ main() {
       ;;
     --admin-reset-setup)
       admin_reset_setup
+      ;;
+    --admin-cleanup-docker)
+      admin_cleanup_docker
       ;;
     --admin-access-status)
       admin_access_status
