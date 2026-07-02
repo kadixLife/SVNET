@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-VERSION="1.1.0-alpha.1"
+VERSION="1.1.0-alpha.2"
 
 BASE_DIR="/opt/svobodanet"
 CONFIG="/opt/svobodanet/config/svnet.conf"
@@ -1647,6 +1647,10 @@ admin_module_dir() {
   printf '%s/admin\n' "$REPO_DIR"
 }
 
+admin_env_file() {
+  printf '%s/.env\n' "$ADMIN_DIR"
+}
+
 admin_compose_command() {
   if command_exists docker && docker compose version >/dev/null 2>&1; then
     printf '%s\n' "docker compose"
@@ -1661,11 +1665,15 @@ admin_compose_command() {
   return 1
 }
 
+admin_compose_available() {
+  command_exists docker && docker compose version >/dev/null 2>&1
+}
+
 run_admin_compose() {
   local admin_repo env_file
   local compose=()
   admin_repo="$(admin_module_dir)"
-  env_file="$ADMIN_DIR/.env"
+  env_file="$(admin_env_file)"
 
   if command_exists docker && docker compose version >/dev/null 2>&1; then
     compose=(docker compose)
@@ -1693,108 +1701,543 @@ run_admin_compose() {
   )
 }
 
-admin_install() {
-  require_root || return 1
-  load_config
-
-  local admin_repo env_src env_dst compose_name
-  admin_repo="$(admin_module_dir)"
-  env_src="$admin_repo/.env.example"
-  env_dst="$ADMIN_DIR/.env"
-  compose_name="$(admin_compose_command 2>/dev/null || true)"
-
-  echo "GUI Admin Panel v1.1.0-alpha"
-  echo
-  command_exists docker && ok "Docker найден: $(docker --version 2>/dev/null)" || warn "Docker не найден."
-
-  if [[ -n "$compose_name" ]]; then
-    ok "Docker Compose найден: $compose_name"
-  else
-    warn "Docker Compose не найден."
-  fi
-
-  if [[ -d "$admin_repo" ]]; then
-    ok "Admin module найден: $admin_repo"
-  else
-    fail "Admin module не найден: $admin_repo"
-    echo "Проверьте, что репозиторий обновлён до версии с каталогом admin/."
+admin_check_os() {
+  if [[ ! -f /etc/os-release ]]; then
+    warn "OS не определена: /etc/os-release не найден."
     return 1
   fi
+
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  if [[ "${ID:-}" != "ubuntu" ]]; then
+    warn "Поддерживается Ubuntu 22.04/24.04. Найдено: ${PRETTY_NAME:-unknown}"
+    return 1
+  fi
+
+  case "${VERSION_ID:-}" in
+    22.04|24.04)
+      ok "OS: ${PRETTY_NAME:-Ubuntu $VERSION_ID}"
+      ;;
+    *)
+      warn "Поддерживается Ubuntu 22.04/24.04. Найдено: ${PRETTY_NAME:-unknown}"
+      return 1
+      ;;
+  esac
+}
+
+admin_install_docker_package() {
+  if ! command_exists apt-get; then
+    fail "apt-get не найден. Автоустановка Docker поддерживается только на Ubuntu."
+    return 1
+  fi
+
+  info "Устанавливаю Docker через apt..."
+  DEBIAN_FRONTEND=noninteractive apt-get update || return 1
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io || return 1
+  if command_exists systemctl; then
+    systemctl enable --now docker >/dev/null 2>&1 || true
+  fi
+}
+
+admin_install_compose_package() {
+  if ! command_exists apt-get; then
+    fail "apt-get не найден. Автоустановка Docker Compose plugin поддерживается только на Ubuntu."
+    return 1
+  fi
+
+  info "Устанавливаю Docker Compose plugin через apt..."
+  DEBIAN_FRONTEND=noninteractive apt-get update || return 1
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || {
+    warn "docker-compose-plugin недоступен, пробую docker-compose."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose || return 1
+  }
+}
+
+admin_ensure_docker() {
+  local dry_run="${1:-}"
+  if command_exists docker; then
+    ok "Docker: $(docker --version 2>/dev/null)"
+    return 0
+  fi
+
+  warn "Docker не найден."
+  if [[ "$dry_run" == "--dry-run" ]]; then
+    info "Dry-run: здесь был бы запрос на автоустановку Docker."
+    return 0
+  fi
+
+  confirm "Docker не найден. Установить автоматически?" || return 1
+  admin_install_docker_package
+}
+
+admin_ensure_compose() {
+  local dry_run="${1:-}"
+  local compose_name
+  compose_name="$(admin_compose_command 2>/dev/null || true)"
+  if [[ -n "$compose_name" ]]; then
+    ok "Docker Compose: $compose_name"
+    return 0
+  fi
+
+  warn "Docker Compose plugin не найден."
+  if [[ "$dry_run" == "--dry-run" ]]; then
+    info "Dry-run: здесь был бы запрос на автоустановку Docker Compose plugin."
+    return 0
+  fi
+
+  confirm "Docker Compose plugin не найден. Установить автоматически?" || return 1
+  admin_install_compose_package
+  admin_compose_command >/dev/null
+}
+
+admin_random_secret() {
+  local bytes="${1:-32}"
+  if command_exists openssl; then
+    openssl rand -hex "$bytes"
+    return 0
+  fi
+
+  tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$((bytes * 2))"
+  echo
+}
+
+admin_env_value() {
+  local key="$1" file
+  file="$(admin_env_file)"
+  [[ -f "$file" ]] || return 1
+  grep -E "^${key}=" "$file" | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//'
+}
+
+admin_set_env_value() {
+  local key="$1" value="$2" file tmp
+  file="$(admin_env_file)"
+  tmp="$(mktemp)"
+
+  if [[ -f "$file" ]] && grep -qE "^${key}=" "$file"; then
+    sed "s|^${key}=.*|${key}=${value}|" "$file" > "$tmp" && mv "$tmp" "$file"
+  else
+    cat "$file" > "$tmp"
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    mv "$tmp" "$file"
+  fi
+}
+
+admin_env_missing_or_placeholder() {
+  local key="$1" value
+  value="$(admin_env_value "$key" 2>/dev/null || true)"
+  [[ -z "$value" || "$value" == CHANGE_* ]]
+}
+
+admin_set_env_default() {
+  local key="$1" value="$2"
+  if admin_env_missing_or_placeholder "$key"; then
+    admin_set_env_value "$key" "$value"
+  fi
+}
+
+admin_prepare_env() {
+  local env_src env_dst postgres_user postgres_db postgres_password jwt_secret setup_token setup_token_created=0 database_url
+  env_src="$(admin_module_dir)/.env.example"
+  env_dst="$(admin_env_file)"
 
   mkdir -p "$ADMIN_DIR"
 
   if [[ ! -f "$env_dst" ]]; then
-    if [[ ! -f "$env_src" ]]; then
-      fail "Example env не найден: $env_src"
-      return 1
+    if [[ -f "$env_src" ]]; then
+      cp "$env_src" "$env_dst"
+    else
+      touch "$env_dst"
     fi
-    cp "$env_src" "$env_dst"
-    chmod 600 "$env_dst" 2>/dev/null || true
     ok "Создан $env_dst"
   else
-    ok "$env_dst уже существует, не перезаписываю."
+    ok "$env_dst уже существует, реальные значения не перезаписываю."
   fi
 
-  cat <<TEXT
+  chmod 600 "$env_dst" 2>/dev/null || true
 
-Что сделать дальше:
-1. Отредактируйте секреты:
-   sudo nano $env_dst
+  if admin_env_missing_or_placeholder JWT_SECRET; then
+    jwt_secret="$(admin_random_secret 32)"
+    admin_set_env_value JWT_SECRET "$jwt_secret"
+    ok "JWT_SECRET сгенерирован."
+  fi
 
-2. Сгенерируйте ADMIN_PASSWORD_HASH по инструкции:
-   $admin_repo/README.md
+  if admin_env_missing_or_placeholder POSTGRES_PASSWORD; then
+    postgres_password="$(admin_random_secret 24)"
+    admin_set_env_value POSTGRES_PASSWORD "$postgres_password"
+    ok "POSTGRES_PASSWORD сгенерирован."
+  else
+    postgres_password="$(admin_env_value POSTGRES_PASSWORD)"
+  fi
 
-3. Проверьте состояние:
-   sudo svnet --admin-status
+  if admin_env_missing_or_placeholder ADMIN_SETUP_TOKEN; then
+    setup_token="$(admin_random_secret 18)"
+    admin_set_env_value ADMIN_SETUP_TOKEN "$setup_token"
+    setup_token_created=1
+    ok "ADMIN_SETUP_TOKEN сгенерирован."
+  else
+    setup_token="$(admin_env_value ADMIN_SETUP_TOKEN)"
+  fi
 
-4. Запуск только после проверки .env:
-   sudo svnet --admin-start
+  admin_set_env_default NODE_ENV production
+  admin_set_env_default FRONTEND_PORT "${FRONTEND_PORT:-3000}"
+  admin_set_env_default BACKEND_PORT "${BACKEND_PORT:-3001}"
+  admin_set_env_default FRONTEND_ORIGIN "${FRONTEND_ORIGIN:-http://localhost:3000}"
+  admin_set_env_default NEXT_PUBLIC_API_BASE /api
+  admin_set_env_default BACKEND_URL http://backend:3001
+  admin_set_env_default AUTH_COOKIE_NAME svnet_admin_session
+  admin_set_env_default COOKIE_SECURE false
+  admin_set_env_default POSTGRES_USER "${POSTGRES_USER:-svnet_admin}"
+  admin_set_env_default POSTGRES_DB "${POSTGRES_DB:-svnet_admin}"
+  admin_set_env_default SVNET_CLI "$CLI"
+  admin_set_env_default SVNET_BASE_DIR "$BASE_DIR"
+  admin_set_env_default MIKROTIK_HOST "$MIKROTIK_VPN_IP"
+  admin_set_env_default MIKROTIK_API_PORT 8728
 
-Production GUI не запускается автоматически. OpenVPN, firewall и MikroTik configs не меняются.
-TEXT
+  postgres_user="$(admin_env_value POSTGRES_USER 2>/dev/null || printf '%s' svnet_admin)"
+  postgres_db="$(admin_env_value POSTGRES_DB 2>/dev/null || printf '%s' svnet_admin)"
+  database_url="$(admin_env_value DATABASE_URL 2>/dev/null || true)"
+  if [[ -z "$database_url" || "$database_url" == *CHANGE_* ]]; then
+    admin_set_env_value DATABASE_URL "postgres://${postgres_user}:${postgres_password}@postgres:5432/${postgres_db}"
+  fi
+
+  chmod 600 "$env_dst" 2>/dev/null || true
+  ADMIN_SETUP_TOKEN_CREATED="$setup_token_created"
+  ADMIN_SETUP_TOKEN_VALUE="$setup_token"
+}
+
+admin_port() {
+  local key="$1" fallback="$2" value
+  value="$(admin_env_value "$key" 2>/dev/null || true)"
+  printf '%s\n' "${value:-$fallback}"
+}
+
+admin_frontend_url() {
+  printf 'http://127.0.0.1:%s\n' "$(admin_port FRONTEND_PORT 3000)"
+}
+
+admin_backend_url() {
+  printf 'http://127.0.0.1:%s/api/health\n' "$(admin_port BACKEND_PORT 3001)"
+}
+
+admin_http_code() {
+  local url="$1"
+  local code
+  command_exists curl || {
+    printf 'curl-missing\n'
+    return 1
+  }
+  code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || true)"
+  if [[ "$code" == "200" ]]; then
+    printf '200\n'
+  else
+    printf 'failed\n'
+  fi
+}
+
+admin_container_state() {
+  local service="$1" id state
+  if ! command_exists docker || ! admin_compose_command >/dev/null 2>&1; then
+    printf 'missing\n'
+    return 0
+  fi
+
+  id="$(run_admin_compose ps -q "$service" 2>/dev/null || true)"
+  if [[ -z "$id" ]]; then
+    printf 'missing\n'
+    return 0
+  fi
+
+  state="$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null || true)"
+  printf '%s\n' "${state:-missing}"
+}
+
+admin_print_access() {
+  local server_ip frontend_url
+  server_ip="$(get_server_ip)"
+  frontend_url="$(admin_frontend_url)"
+  echo "Доступ:"
+  echo "$frontend_url"
+  echo
+  echo "Безопасный доступ с ПК:"
+  echo "ssh -L 3000:127.0.0.1:3000 root@$server_ip"
+  echo
+  echo "Потом откройте:"
+  echo "http://127.0.0.1:3000"
+}
+
+admin_wait_health() {
+  local attempt frontend_code backend_code frontend_url backend_url
+  frontend_url="$(admin_frontend_url)"
+  backend_url="$(admin_backend_url)"
+
+  for attempt in {1..30}; do
+    frontend_code="$(admin_http_code "$frontend_url")"
+    backend_code="$(admin_http_code "$backend_url")"
+    if [[ "$frontend_code" == "200" && "$backend_code" == "200" ]]; then
+      ok "frontend health: 200"
+      ok "backend health: 200"
+      return 0
+    fi
+    info "Ждём Admin Panel health... попытка $attempt/30 (frontend=$frontend_code backend=$backend_code)"
+    sleep 2
+  done
+
+  warn "Admin Panel health не подтвердился."
+  echo "frontend: $(admin_http_code "$frontend_url")"
+  echo "backend: $(admin_http_code "$backend_url")"
+  return 1
+}
+
+admin_check_prereqs() {
+  local dry_run="${1:-}" admin_repo
+  admin_repo="$(admin_module_dir)"
+
+  admin_check_os || return 1
+
+  if [[ -d "$admin_repo" ]]; then
+    ok "Admin module: $admin_repo"
+  else
+    fail "Admin module не найден: $admin_repo"
+    echo "Проверьте, что /opt/svobodanet/repo обновлён."
+    return 1
+  fi
+
+  admin_ensure_docker "$dry_run" || return 1
+  admin_ensure_compose "$dry_run" || return 1
+}
+
+admin_compose_config_check() {
+  info "Проверяю docker compose config..."
+  run_admin_compose config >/dev/null
+  ok "docker compose config: OK"
+}
+
+admin_install() {
+  require_root || return 1
+  load_config
+
+  local dry_run="${1:-}"
+
+  echo "GUI Admin Panel v1.1.0-alpha.2"
+  echo
+
+  admin_check_prereqs "$dry_run" || return 1
+
+  if [[ "$dry_run" == "--dry-run" ]]; then
+    info "Dry-run: .env, Docker containers и volumes не менялись."
+    return 0
+  fi
+
+  admin_prepare_env || return 1
+  admin_compose_config_check || return 1
+
+  echo
+  ok "Admin Panel подготовлена."
+  if confirm "Запустить сейчас?"; then
+    run_admin_compose up -d --build || return 1
+    admin_wait_health || true
+    echo
+    ok "SVNET Admin Panel установлена и запущена."
+  else
+    info "Запуск пропущен. Позже выполните: sudo svnet --admin-start"
+  fi
+
+  echo
+  admin_print_access
+  if [[ "${ADMIN_SETUP_TOKEN_CREATED:-0}" == "1" ]]; then
+    echo
+    echo "Первичная настройка:"
+    echo "Setup token: $ADMIN_SETUP_TOKEN_VALUE"
+  fi
 }
 
 admin_status() {
   load_config
 
-  local admin_repo env_file compose_name
+  local admin_repo env_file compose_name frontend_code backend_code
   admin_repo="$(admin_module_dir)"
-  env_file="$ADMIN_DIR/.env"
+  env_file="$(admin_env_file)"
   compose_name="$(admin_compose_command 2>/dev/null || true)"
+  frontend_code="$(admin_http_code "$(admin_frontend_url)")"
+  backend_code="$(admin_http_code "$(admin_backend_url)")"
 
-  echo "GUI Admin Panel status"
+  echo "SVNET Admin Panel status"
+  echo
+  echo "Install path: $admin_repo"
+  echo "Data path: $ADMIN_DIR"
+  [[ -f "$env_file" ]] && echo "Env: exists" || echo "Env: missing"
+  command_exists docker && echo "Docker: installed" || echo "Docker: missing"
+  [[ -n "$compose_name" ]] && echo "Docker Compose: installed ($compose_name)" || echo "Docker Compose: missing"
   echo
 
-  [[ -d "$admin_repo" ]] && ok "Admin module: $admin_repo" || warn "Admin module не найден: $admin_repo"
-  [[ -f "$env_file" ]] && ok "Admin env: $env_file" || warn "Admin env не найден: $env_file"
-  command_exists docker && ok "Docker: $(docker --version 2>/dev/null)" || warn "Docker не найден."
-  [[ -n "$compose_name" ]] && ok "Docker Compose: $compose_name" || warn "Docker Compose не найден."
-
-  if [[ -d "$admin_repo" && -f "$env_file" && -n "$compose_name" ]]; then
-    echo
-    run_admin_compose ps || warn "Docker Compose status недоступен."
-  fi
-
+  echo "Containers:"
+  echo "- postgres: $(admin_container_state postgres)"
+  echo "- backend: $(admin_container_state backend)"
+  echo "- frontend: $(admin_container_state frontend)"
   echo
-  echo "Документация: $admin_repo/README.md"
-  echo "Команды: sudo svnet --admin-install | --admin-start | --admin-stop"
+
+  echo "Health:"
+  echo "- frontend: $frontend_code"
+  echo "- backend: $backend_code"
+  echo
+
+  echo "Access:"
+  echo "$(admin_frontend_url)"
 }
 
 admin_start() {
   require_root || return 1
   load_config
 
-  admin_status
-  echo
-  warn "Перед запуском проверьте ADMIN_PASSWORD_HASH, JWT_SECRET и POSTGRES_PASSWORD в $ADMIN_DIR/.env."
-  confirm "Запустить SVNET Admin Panel через Docker Compose?" || return 0
-  run_admin_compose up -d --build
+  [[ -f "$(admin_env_file)" ]] || {
+    fail "Admin .env не найден. Выполните: sudo svnet --admin-install"
+    return 1
+  }
+  admin_ensure_docker || return 1
+  admin_ensure_compose || return 1
+  run_admin_compose up -d || return 1
+  admin_wait_health || true
+  admin_print_access
 }
 
 admin_stop() {
   require_root || return 1
   load_config
-  run_admin_compose stop
+  run_admin_compose down
+  ok "Admin Panel остановлена. Volumes и $ADMIN_DIR не удалены."
+}
+
+admin_restart() {
+  require_root || return 1
+  load_config
+  run_admin_compose restart || return 1
+  admin_wait_health || true
+}
+
+admin_update() {
+  require_root || return 1
+  load_config
+  warn "Будут обновлены только admin containers. OpenVPN, MikroTik и firewall не трогаются."
+  run_admin_compose pull || true
+  run_admin_compose up -d --build || return 1
+  admin_wait_health || true
+}
+
+admin_backup_data_dir() {
+  local backup_dir
+  [[ -d "$ADMIN_DIR" ]] || return 0
+  backup_dir="${ADMIN_DIR}.backup_$(date +%F_%H-%M-%S)"
+  cp -a "$ADMIN_DIR" "$backup_dir" || return 1
+  ok "Backup Admin data: $backup_dir"
+}
+
+admin_reinstall() {
+  require_root || return 1
+  load_config
+  warn "Переустановка пересоздаст containers, но не удалит volumes без отдельного подтверждения."
+  confirm "Продолжить переустановку Admin Panel?" || return 0
+  admin_backup_data_dir || return 1
+  run_admin_compose down || true
+  run_admin_compose up -d --build || return 1
+  admin_wait_health || true
+}
+
+admin_remove() {
+  require_root || return 1
+  load_config
+  warn "Удаление Admin Panel не должно затрагивать OpenVPN, MikroTik и firewall."
+  confirm_word "Первое подтверждение удаления Admin Panel." "REMOVE_ADMIN" || return 0
+  confirm_word "Второе подтверждение удаления Admin Panel." "REMOVE_ADMIN" || return 0
+
+  if confirm "Удалить Docker volumes с PostgreSQL данными?"; then
+    run_admin_compose down -v || true
+  else
+    run_admin_compose down || true
+    ok "Docker volumes сохранены."
+  fi
+
+  if confirm "Удалить $ADMIN_DIR с .env и служебными файлами?"; then
+    if [[ "$ADMIN_DIR" == "/opt/svobodanet-admin" ]]; then
+      rm -rf "$ADMIN_DIR"
+      ok "$ADMIN_DIR удалён."
+    else
+      fail "ADMIN_DIR выглядит нестандартно, удаление остановлено: $ADMIN_DIR"
+      return 1
+    fi
+  else
+    ok "$ADMIN_DIR сохранён."
+  fi
+}
+
+admin_logs() {
+  load_config
+  run_admin_compose logs --tail=120
+}
+
+admin_reset_password() {
+  require_root || return 1
+  load_config
+
+  local username password repeat
+  read -r -p "Admin username: " username || return 1
+  read -r -s -p "Новый пароль: " password || return 1
+  echo
+  read -r -s -p "Повторите пароль: " repeat || return 1
+  echo
+
+  if [[ "$password" != "$repeat" ]]; then
+    fail "Пароли не совпадают."
+    return 1
+  fi
+
+  if (( ${#password} < 12 )); then
+    fail "Пароль должен быть не короче 12 символов."
+    return 1
+  fi
+
+  run_admin_compose up -d postgres || return 1
+  run_admin_compose build backend || return 1
+  export SVNET_ADMIN_USER="$username"
+  export SVNET_ADMIN_PASSWORD="$password"
+  run_admin_compose run --rm -e SVNET_ADMIN_USER -e SVNET_ADMIN_PASSWORD backend node dist/adminCli.js reset-password
+  local rc=$?
+  unset SVNET_ADMIN_USER SVNET_ADMIN_PASSWORD
+  return "$rc"
+}
+
+admin_menu() {
+  local choice
+  while true; do
+    header
+    menu_title "4) GUI Admin Panel"
+    menu_item "1" "Установить Admin Panel" "Проверить Docker, создать .env, запустить setup и проверить health."
+    menu_item "2" "Статус Admin Panel" "Показать пути, Docker, контейнеры, health и локальный URL."
+    menu_item "3" "Запустить Admin Panel" "Запустить containers без удаления данных и проверить доступность."
+    menu_item "4" "Перезапустить Admin Panel" "Перезапустить containers и проверить health."
+    menu_item "5" "Остановить Admin Panel" "Остановить containers, не удаляя volumes и .env."
+    menu_item "6" "Обновить Admin Panel" "Пересобрать admin containers, не трогая OpenVPN/MikroTik/firewall."
+    menu_item "7" "Переустановить Admin Panel" "Сделать backup data dir и пересоздать containers без удаления volumes."
+    menu_item "8" "Удалить Admin Panel" "Остановить containers; удаление volumes/data только по отдельному подтверждению."
+    menu_item "9" "Показать логи" "Показать последние 120 строк docker compose logs."
+    menu_item "10" "Сбросить пароль администратора" "Задать новый пароль и обновить bcrypt hash в PostgreSQL."
+    menu_item "0" "Назад" "Вернуться в главное меню."
+    echo
+    read -r -p "Выберите пункт: " choice || return 0
+    case "$choice" in
+      1) admin_install; pause ;;
+      2) admin_status; pause ;;
+      3) admin_start; pause ;;
+      4) admin_restart; pause ;;
+      5) admin_stop; pause ;;
+      6) admin_update; pause ;;
+      7) admin_reinstall; pause ;;
+      8) admin_remove; pause ;;
+      9) admin_logs; pause ;;
+      10) admin_reset_password; pause ;;
+      0) return 0 ;;
+      *) warn "Неверный пункт."; sleep 1 ;;
+    esac
+  done
 }
 
 validate_all_lists() {
@@ -2462,7 +2905,7 @@ main_menu() {
     menu_item "1" "Статус OpenVPN" "Проверить VPN, порт, tun-интерфейс и файлы."
     menu_item "2" "Перезапустить OpenVPN" "Сделать backup и перезапустить VPN-сервис."
     menu_item "3" "MikroTik: установка и проверка" "Подготовить файлы, команды и проверить роутер."
-    menu_item "4" "Установить GUI Admin Panel" "Подготовить web-панель, .env и Docker Compose без запуска."
+    menu_item "4" "GUI Admin Panel" "Установить, запустить, обновить, удалить или посмотреть логи веб-панели."
     menu_item "5" "Сайты, IP и маршрутизация" "Настроить, что идёт напрямую, а что через VPN."
     menu_item "6" "Backup / Restore" "Создать резервную копию или восстановиться из неё."
     menu_item "7" "Диагностика сервера" "Показать систему, сервисы, порты и файлы."
@@ -2476,7 +2919,7 @@ main_menu() {
       1) status_openvpn; pause ;;
       2) restart_openvpn; pause ;;
       3) mikrotik_menu ;;
-      4) admin_install; pause ;;
+      4) admin_menu ;;
       5) routes_menu ;;
       6) backup_menu ;;
       7) server_diagnostics; pause ;;
@@ -2510,10 +2953,19 @@ Usage:
   svnet --publish-status
                            show HTTP publish state and URLs
   svnet --admin-install
-                           prepare GUI Admin Panel env and Docker Compose
+                           install GUI Admin Panel lifecycle automatically
+  svnet --admin-install --dry-run
+                           check Admin Panel prerequisites without changes
   svnet --admin-status    show GUI Admin Panel status
-  svnet --admin-start     start GUI Admin Panel after confirmation
-  svnet --admin-stop      stop GUI Admin Panel containers
+  svnet --admin-start     start GUI Admin Panel
+  svnet --admin-stop      stop GUI Admin Panel without deleting data
+  svnet --admin-restart   restart GUI Admin Panel
+  svnet --admin-update    rebuild/update Admin Panel containers
+  svnet --admin-reinstall reinstall Admin Panel containers safely
+  svnet --admin-remove    remove Admin Panel with confirmations
+  svnet --admin-logs      show Admin Panel logs
+  svnet --admin-reset-password
+                           reset Admin Panel admin password
   svnet --repair-git-repo
                            rebuild /opt/svobodanet/repo as Git repository
   svnet --help         show this help
@@ -2556,7 +3008,7 @@ main() {
       publish_status
       ;;
     --admin-install)
-      admin_install
+      admin_install "${2:-}"
       ;;
     --admin-status)
       admin_status
@@ -2566,6 +3018,24 @@ main() {
       ;;
     --admin-stop)
       admin_stop
+      ;;
+    --admin-restart)
+      admin_restart
+      ;;
+    --admin-update)
+      admin_update
+      ;;
+    --admin-reinstall)
+      admin_reinstall
+      ;;
+    --admin-remove)
+      admin_remove
+      ;;
+    --admin-logs)
+      admin_logs
+      ;;
+    --admin-reset-password)
+      admin_reset_password
       ;;
     --repair-git-repo)
       repair_git_repo

@@ -8,12 +8,18 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { config } from "./config";
-import { initDb, logAction } from "./db";
+import { getAdminUser, hasAdminUsers, initDb, logAction, upsertAdminUser } from "./db";
 import { parseStatusFlags, parseSvnetVersion, parseUpdateCheck } from "./parsers";
 import { runFile } from "./processRunner";
 import { runSvnetCommand, SvnetCommandKey, svnetCommandText } from "./svnetCli";
 
 type LoginBody = {
+  username?: string;
+  password?: string;
+};
+
+type SetupBody = {
+  setupToken?: string;
   username?: string;
   password?: string;
 };
@@ -196,21 +202,58 @@ async function registerRoutes() {
   app.get("/api/health", async () => ({
     ok: true,
     service: "svnet-admin-backend",
-    version: "1.1.0-alpha.1"
+    version: "1.1.0-alpha.2"
   }));
+
+  app.get("/api/setup/status", async () => ({
+    ok: true,
+    needsSetup: !(await hasAdminUsers())
+  }));
+
+  app.post("/api/setup", async (request, reply) => {
+    if (await hasAdminUsers()) {
+      return reply.code(409).send({ ok: false, error: "setup_already_completed" });
+    }
+
+    const body = (request.body ?? {}) as SetupBody;
+    const username = body.username?.trim() ?? "";
+    const password = body.password ?? "";
+
+    if (body.setupToken !== config.adminSetupToken) {
+      return reply.code(401).send({ ok: false, error: "invalid_setup_token" });
+    }
+
+    if (username.length < 3) {
+      return reply.code(400).send({ ok: false, error: "username_too_short" });
+    }
+
+    if (password.length < 12) {
+      return reply.code(400).send({ ok: false, error: "password_too_short" });
+    }
+
+    const hash = await bcrypt.hash(password, 12);
+    await upsertAdminUser(username, hash);
+    await logAction("setup", "admin-setup", "success", { username });
+    return { ok: true };
+  });
 
   app.post("/api/auth/login", async (request, reply) => {
     const body = (request.body ?? {}) as LoginBody;
-    if (body.username !== config.adminUser || !body.password) {
+    if (!body.username || !body.password) {
       return reply.code(401).send({ ok: false, error: "invalid_credentials" });
     }
 
-    const valid = await bcrypt.compare(body.password, config.adminPasswordHash);
+    const user = await getAdminUser(body.username);
+    if (!user) {
+      return reply.code(401).send({ ok: false, error: "invalid_credentials" });
+    }
+
+    const valid = await bcrypt.compare(body.password, user.passwordHash);
     if (!valid) {
       return reply.code(401).send({ ok: false, error: "invalid_credentials" });
     }
 
-    const token = app.jwt.sign({ sub: config.adminUser, role: "admin" }, { expiresIn: "12h" });
+    const token = app.jwt.sign({ sub: user.username, role: "admin" }, { expiresIn: "12h" });
     reply.setCookie(config.authCookieName, token, {
       httpOnly: true,
       sameSite: "lax",
@@ -219,7 +262,7 @@ async function registerRoutes() {
       maxAge: 12 * 60 * 60
     });
 
-    return { ok: true, user: config.adminUser };
+    return { ok: true, user: user.username };
   });
 
   app.post("/api/auth/logout", { preHandler: requireAuth }, async (_request, reply) => {

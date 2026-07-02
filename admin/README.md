@@ -1,42 +1,51 @@
-# SVNET Admin Panel v1.1.0-alpha.1
+# SVNET Admin Panel v1.1.0-alpha.2
 
 Первый MVP веб-панели для СвободаNET. Модуль живёт отдельно от стабильного CLI и вызывает только allowlist-команды `svnet`.
 
 ## Состав
 
 - `frontend/` - Next.js, TypeScript, Tailwind CSS, shadcn-style UI components, Recharts.
-- `backend/` - Fastify, TypeScript, JWT httpOnly cookie auth, bcrypt password hash, safe `svnet` wrapper.
-- `postgres` - хранит action log: кто нажал dangerous action, когда и с каким результатом.
+- `backend/` - Fastify, TypeScript, JWT httpOnly cookie auth, first-run setup, safe `svnet` wrapper.
+- `postgres` - хранит admin users и action log.
 - `nginx/svnet-admin.conf.example` - reverse proxy пример без автоматического HTTPS.
 
 ## Быстрый старт на VPS
 
 ```bash
 sudo svnet --admin-install
-sudo nano /opt/svobodanet-admin/.env
-sudo svnet --admin-status
-sudo svnet --admin-start
 ```
 
-Панель слушает только `127.0.0.1:3000` и `127.0.0.1:3001`. Для доступа из браузера поставьте Nginx перед сервисами.
+Если Docker или Docker Compose plugin отсутствуют, `svnet` предложит установить их автоматически через `apt`. После подготовки скрипт предложит сразу запустить containers и покажет URL, SSH tunnel и setup token.
 
-## Пароль администратора
+## Первичная настройка
 
-В `.env` хранится только bcrypt hash:
-
-```bash
-cd /opt/svobodanet/repo/admin/backend
-npm install
-node -e "const bcrypt=require('bcryptjs'); bcrypt.hash(process.argv[1], 12).then(console.log)" 'CHANGE_STRONG_PASSWORD'
-```
-
-Полученный hash вставьте в:
+Откройте:
 
 ```text
-ADMIN_PASSWORD_HASH=...
+http://127.0.0.1:3000/setup
 ```
 
-Также обязательно замените `JWT_SECRET` и `POSTGRES_PASSWORD`.
+Введите setup token из вывода `svnet --admin-install`, затем создайте admin username/password. Пароль хешируется backend-ом и сохраняется в PostgreSQL.
+
+## Lifecycle
+
+```bash
+sudo svnet --admin-status
+sudo svnet --admin-start
+sudo svnet --admin-stop
+sudo svnet --admin-restart
+sudo svnet --admin-update
+sudo svnet --admin-reinstall
+sudo svnet --admin-remove
+sudo svnet --admin-logs
+sudo svnet --admin-reset-password
+```
+
+Панель слушает только `127.0.0.1:3000` и `127.0.0.1:3001`. Для доступа с ПК используйте SSH tunnel:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 root@SERVER_IP
+```
 
 ## Безопасность MVP
 
@@ -45,7 +54,8 @@ ADMIN_PASSWORD_HASH=...
 - `publish-on`, `publish-off`, `safe update`, `backup create` требуют confirmation.
 - Dangerous actions пишутся в PostgreSQL `action_log`.
 - HTTP publish должен оставаться в offline secure mode после настройки MikroTik.
-- `.env` не хранится в Git.
+- `.env` не хранится в Git и должен иметь права `600`.
+- Admin Panel не открывается на `0.0.0.0` по умолчанию.
 
 ## Что пока read-only
 

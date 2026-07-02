@@ -150,14 +150,14 @@ sudo svnet --publish-off
 
 ## GUI Admin Panel
 
-Начиная с `v1.1.0-alpha.1` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log и безопасный wrapper вокруг `svnet`.
+Начиная с `v1.1.0-alpha.2` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log, first-run setup wizard и безопасный wrapper вокруг `svnet`.
 
 ```bash
 sudo svnet --admin-install
 sudo svnet --admin-status
 ```
 
-Подробная инструкция: [docs/ADMIN_PANEL.md](docs/ADMIN_PANEL.md). Admin Panel не меняет OpenVPN, MikroTik или firewall напрямую; dangerous actions выполняются только через allowlist CLI-команд и требуют подтверждения.
+`--admin-install` сам проверяет Docker/Compose, генерирует секреты, создаёт `.env`, предлагает запуск и показывает SSH tunnel. Подробная инструкция: [docs/ADMIN_PANEL.md](docs/ADMIN_PANEL.md). Admin Panel не меняет OpenVPN, MikroTik или firewall напрямую; dangerous actions выполняются только через allowlist CLI-команд и требуют подтверждения.
 
 ## Безопасность
 

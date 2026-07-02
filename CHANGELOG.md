@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 1.1.0-alpha.2 - 2026-07-02
+
+- Переделан lifecycle GUI Admin Panel: добавлены install/status/start/stop/restart/update/reinstall/remove/logs/reset-password команды и отдельное меню.
+- `svnet --admin-install` теперь проверяет Ubuntu 22.04/24.04, Docker, Docker Compose plugin, предлагает auto-install через apt, генерирует `.env` и проверяет Docker Compose config.
+- Добавлен first-run setup wizard `/setup`: setup token создаётся CLI, admin password хешируется backend-ом и сохраняется в PostgreSQL.
+- Admin Panel по умолчанию остаётся доступной только через `127.0.0.1`; frontend проксирует `/api` на backend внутри Docker.
+- Добавлены health checks, SSH tunnel instructions, безопасный remove flow и reset password через backend helper.
+
 ## 1.1.0-alpha.1 - 2026-07-01
 
 - Начат новый этап SVNET Admin Panel: добавлен отдельный модуль `admin/` с Docker Compose, backend API, frontend dashboard skeleton, `.env.example` и Nginx example.

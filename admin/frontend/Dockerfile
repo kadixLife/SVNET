@@ -2,7 +2,9 @@ FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 ARG NEXT_PUBLIC_API_BASE=/api
+ARG BACKEND_URL=http://backend:3001
 ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
+ENV BACKEND_URL=${BACKEND_URL}
 COPY package.json ./
 RUN npm install
 COPY . .
@@ -12,6 +14,7 @@ FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production
+ENV BACKEND_URL=http://backend:3001
 COPY package.json ./
 RUN npm install --omit=dev
 COPY --from=build /app/.next ./.next
