@@ -13,9 +13,9 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    api<{ needsSetup: boolean }>("/setup/status")
+    api<{ setupRequired: boolean; needsSetup?: boolean }>("/setup/status")
       .then((status) => {
-        if (status.needsSetup) {
+        if (status.setupRequired ?? status.needsSetup) {
           window.location.href = "/setup";
         }
       })

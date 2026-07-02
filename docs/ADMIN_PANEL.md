@@ -1,6 +1,6 @@
 # SVNET Admin Panel
 
-SVNET Admin Panel v1.1.0-alpha.6 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall без явной команды. Все dangerous actions выполняются только через allowlist команд `svnet`.
+SVNET Admin Panel v1.1.0-alpha.7 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall без явной команды. Все dangerous actions выполняются только через allowlist команд `svnet`.
 
 ## Автоматическая установка
 
@@ -16,7 +16,7 @@ sudo svnet --admin-install
 - проверяет Docker Compose plugin и предлагает установить его через `apt`;
 - создаёт `/opt/svobodanet-admin`;
 - создаёт `/opt/svobodanet-admin/.env`, если его нет;
-- генерирует `JWT_SECRET`, `POSTGRES_PASSWORD`, `ADMIN_SETUP_TOKEN`;
+- генерирует `JWT_SECRET` и `POSTGRES_PASSWORD`;
 - ставит права `600` на `.env`;
 - проверяет `docker compose config`;
 - предлагает сразу запустить Admin Panel;
@@ -49,25 +49,39 @@ sudo svnet
 8) Удалить Admin Panel
 9) Показать логи
 10) Сбросить пароль администратора
-11) Настроить доступ из домашней сети
+11) Сбросить первичную настройку
+12) Настроить доступ из домашней сети
 0) Назад
 ```
 
 ## Первичная настройка
 
-После установки на самом VPS доступен локальный URL:
-
-```text
-http://127.0.0.1:3000/setup
-```
-
-Если включён доступ из домашней сети, ту же настройку можно открыть с домашнего Wi-Fi:
+Основной пользовательский сценарий - открыть панель из домашней сети как роутер:
 
 ```text
 http://svnet.local/setup
 ```
 
-Введите setup token, который `svnet --admin-install` показал после первого создания `.env`, затем создайте admin username/password. Пароль не хранится в `.env`: backend хеширует его bcrypt и сохраняет hash в PostgreSQL.
+или:
+
+```text
+http://10.88.0.1/setup
+```
+
+Страница `/setup` больше не требует setup token. При первом запуске она показывает поля:
+
+- Admin username;
+- Admin password;
+- Repeat password.
+
+Нажмите `Создать администратора`. Backend создаст первого admin только если:
+
+- в PostgreSQL ещё нет admin user;
+- запрос пришёл из trusted network: `127.0.0.1/32` или `10.88.0.0/24`;
+- Host разрешён: `svnet.local`, `10.88.0.1`, `127.0.0.1`, `localhost`;
+- нет признаков public/wildcard exposure для setup flow.
+
+Пароль не хранится в `.env`: backend хеширует его bcrypt и сохраняет hash в PostgreSQL. После создания первого администратора `/setup` закрывается и показывает кнопку `Перейти ко входу`.
 
 ## Доступ из домашней сети
 
@@ -159,6 +173,7 @@ sudo svnet --admin-reinstall
 sudo svnet --admin-remove
 sudo svnet --admin-logs
 sudo svnet --admin-reset-password
+sudo svnet --admin-reset-setup
 sudo svnet --admin-access-status
 sudo svnet --admin-enable-lan-access
 sudo svnet --admin-disable-lan-access
@@ -178,6 +193,14 @@ sudo svnet --admin-reset-password
 
 Команда спросит username и новый пароль, затем обновит bcrypt hash в PostgreSQL через backend helper. Пароль не пишется в `.env`.
 
+## Как сбросить первичную настройку
+
+```bash
+sudo svnet --admin-reset-setup
+```
+
+Это developer recovery. Команда требует подтверждение словом `RESET_SETUP`, удаляет существующих admin users из PostgreSQL и снова открывает `/setup`. Она не удаляет `.env`, Docker volumes, OpenVPN, MikroTik configs и firewall.
+
 ## Как удалить админку
 
 ```bash
@@ -189,7 +212,7 @@ sudo svnet --admin-remove
 ## Функции MVP
 
 - Login/logout через httpOnly cookie.
-- First-run setup через `/setup`.
+- First-run setup через `/setup` без setup token.
 - Dashboard: version, commit/update info, OpenVPN/tun/UDP 1194, HTTP publish, RAM/disk, backups.
 - HTTP publish control: временно включить, отключить, проверить статус.
 - Lists Viewer: только просмотр.

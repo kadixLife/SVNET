@@ -116,6 +116,12 @@ export default function DashboardPage() {
   const load = useCallback(async () => {
     setError("");
     try {
+      const setup = await api<{ setupRequired: boolean; needsSetup?: boolean }>("/setup/status");
+      if (setup.setupRequired ?? setup.needsSetup) {
+        window.location.href = "/setup";
+        return;
+      }
+
       const [versionData, statusData, publishData, updateData, backupData, mikrotikData] = await Promise.all([
         api<VersionResponse>("/svnet/version"),
         api<SvnetStatus>("/svnet/status"),
@@ -188,7 +194,7 @@ export default function DashboardPage() {
             </div>
             <div>
               <h1 className="text-lg font-semibold">SVNET Admin</h1>
-              <p className="text-xs text-muted-foreground">v1.1.0-alpha.6</p>
+              <p className="text-xs text-muted-foreground">v1.1.0-alpha.7</p>
             </div>
           </div>
 

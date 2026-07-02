@@ -8,7 +8,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { config } from "./config";
-import { getAdminUser, hasAdminUsers, initDb, logAction, upsertAdminUser } from "./db";
+import { createFirstAdminUser, getAdminUser, hasAdminUsers, initDb, logAction } from "./db";
 import { parseStatusFlags, parseSvnetVersion, parseUpdateCheck } from "./parsers";
 import { runFile } from "./processRunner";
 import { runSvnetCommand, SvnetCommandKey, svnetCommandText } from "./svnetCli";
@@ -19,7 +19,6 @@ type LoginBody = {
 };
 
 type SetupBody = {
-  setupToken?: string;
   username?: string;
   password?: string;
 };
@@ -39,6 +38,162 @@ const listFiles: Record<string, string> = {
 const app = Fastify({
   logger: true
 });
+
+const SETUP_ALLOWED_HOSTS = new Set(["svnet.local", "10.88.0.1", "127.0.0.1", "localhost"]);
+const SETUP_PASSWORD_MIN_LENGTH = 12;
+const SETUP_RATE_LIMIT_MAX = 8;
+const SETUP_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const setupAttempts = new Map<string, number[]>();
+
+function firstHeader(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) {
+    return value[0] ?? "";
+  }
+  return value ?? "";
+}
+
+function normalizeIp(value: string | undefined): string {
+  if (!value) {
+    return "";
+  }
+
+  let ip = value.trim();
+  if (!ip) {
+    return "";
+  }
+
+  if (ip.includes(",")) {
+    ip = ip.split(",")[0]?.trim() ?? "";
+  }
+
+  if (ip.startsWith("[") && ip.includes("]")) {
+    ip = ip.slice(1, ip.indexOf("]"));
+  }
+
+  if (ip.startsWith("::ffff:")) {
+    ip = ip.slice("::ffff:".length);
+  }
+
+  if (ip.includes("%")) {
+    ip = ip.split("%")[0] ?? "";
+  }
+
+  return ip;
+}
+
+function normalizeHost(value: string | undefined): string {
+  if (!value) {
+    return "";
+  }
+
+  let host = value.trim().toLowerCase();
+  if (!host) {
+    return "";
+  }
+
+  if (host.startsWith("[") && host.includes("]")) {
+    host = host.slice(1, host.indexOf("]"));
+  } else if (host.includes(":")) {
+    host = host.split(":")[0] ?? "";
+  }
+
+  return host.replace(/\.$/, "");
+}
+
+function requestHost(request: FastifyRequest): string {
+  return normalizeHost(firstHeader(request.headers.host));
+}
+
+function isTrustedProxyPeer(ip: string): boolean {
+  if (ip === "127.0.0.1" || ip === "::1") {
+    return true;
+  }
+
+  const parts = ip.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || !parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+    return false;
+  }
+
+  return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
+}
+
+function forwardedIps(request: FastifyRequest): string[] {
+  return firstHeader(request.headers["x-forwarded-for"])
+    .split(",")
+    .map((value) => normalizeIp(value))
+    .filter(Boolean);
+}
+
+function requestClientIp(request: FastifyRequest): string {
+  const realIp = normalizeIp(firstHeader(request.headers["x-real-ip"]));
+  if (realIp) {
+    return realIp;
+  }
+
+  const peerIp = normalizeIp(request.ip) || normalizeIp(request.raw.socket.remoteAddress);
+  if (peerIp && isTrustedProxyPeer(peerIp)) {
+    const trustedForwardedIp = forwardedIps(request).find((ip) => isTrustedSetupIp(ip));
+    if (trustedForwardedIp) {
+      return trustedForwardedIp;
+    }
+  }
+
+  return peerIp;
+}
+
+function isTrustedSetupIp(ip: string): boolean {
+  if (ip === "127.0.0.1" || ip === "::1") {
+    return true;
+  }
+
+  const parts = ip.split(".").map((part) => Number(part));
+  return (
+    parts.length === 4 &&
+    parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255) &&
+    parts[0] === 10 &&
+    parts[1] === 88 &&
+    parts[2] === 0
+  );
+}
+
+function setupRateLimitAllows(key: string): boolean {
+  const now = Date.now();
+  const recent = (setupAttempts.get(key) ?? []).filter((time) => now - time < SETUP_RATE_LIMIT_WINDOW_MS);
+  if (recent.length >= SETUP_RATE_LIMIT_MAX) {
+    setupAttempts.set(key, recent);
+    return false;
+  }
+
+  recent.push(now);
+  setupAttempts.set(key, recent);
+  return true;
+}
+
+function validateSetupAccess(request: FastifyRequest):
+  | { ok: true; host: string; clientIp: string }
+  | { ok: false; status: number; error: string; host: string; clientIp: string } {
+  const host = requestHost(request);
+  const forwardedHost = normalizeHost(firstHeader(request.headers["x-forwarded-host"]));
+  const clientIp = requestClientIp(request);
+
+  if (!host || !SETUP_ALLOWED_HOSTS.has(host)) {
+    return { ok: false, status: 403, error: "setup_untrusted_host", host, clientIp };
+  }
+
+  if (forwardedHost && !SETUP_ALLOWED_HOSTS.has(forwardedHost)) {
+    return { ok: false, status: 403, error: "setup_public_exposure", host, clientIp };
+  }
+
+  if (!isTrustedSetupIp(clientIp)) {
+    return { ok: false, status: 403, error: "setup_untrusted_network", host, clientIp };
+  }
+
+  return { ok: true, host, clientIp };
+}
+
+function validateUsername(username: string): boolean {
+  return /^[A-Za-z0-9._-]{3,32}$/.test(username);
+}
 
 function currentUser(request: FastifyRequest): string {
   const user = request.user as { sub?: string } | undefined;
@@ -202,40 +357,60 @@ async function registerRoutes() {
   app.get("/api/health", async () => ({
     ok: true,
     service: "svnet-admin-backend",
-    version: "1.1.0-alpha.6"
+    version: "1.1.0-alpha.7"
   }));
 
-  app.get("/api/setup/status", async () => ({
-    ok: true,
-    needsSetup: !(await hasAdminUsers())
-  }));
+  app.get("/api/setup/status", async () => {
+    const setupRequired = !(await hasAdminUsers());
+    return {
+      ok: true,
+      setupRequired,
+      needsSetup: setupRequired
+    };
+  });
 
-  app.post("/api/setup", async (request, reply) => {
+  async function createInitialAdmin(request: FastifyRequest, reply: FastifyReply) {
     if (await hasAdminUsers()) {
       return reply.code(409).send({ ok: false, error: "setup_already_completed" });
+    }
+
+    const access = validateSetupAccess(request);
+    if (!access.ok) {
+      return reply.code(access.status).send({ ok: false, error: access.error });
+    }
+
+    if (!setupRateLimitAllows(access.clientIp)) {
+      return reply.code(429).send({ ok: false, error: "setup_rate_limited" });
     }
 
     const body = (request.body ?? {}) as SetupBody;
     const username = body.username?.trim() ?? "";
     const password = body.password ?? "";
 
-    if (body.setupToken !== config.adminSetupToken) {
-      return reply.code(401).send({ ok: false, error: "invalid_setup_token" });
+    if (!validateUsername(username)) {
+      return reply.code(400).send({ ok: false, error: "invalid_username" });
     }
 
-    if (username.length < 3) {
-      return reply.code(400).send({ ok: false, error: "username_too_short" });
-    }
-
-    if (password.length < 12) {
+    if (password.length < SETUP_PASSWORD_MIN_LENGTH) {
       return reply.code(400).send({ ok: false, error: "password_too_short" });
     }
 
     const hash = await bcrypt.hash(password, 12);
-    await upsertAdminUser(username, hash);
-    await logAction("setup", "admin-setup", "success", { username });
+    const created = await createFirstAdminUser(username, hash);
+    if (!created) {
+      return reply.code(409).send({ ok: false, error: "setup_already_completed" });
+    }
+
+    await logAction("setup", "admin-setup", "success", {
+      username,
+      clientIp: access.clientIp,
+      host: access.host
+    });
     return { ok: true };
-  });
+  }
+
+  app.post("/api/setup/create", createInitialAdmin);
+  app.post("/api/setup", createInitialAdmin);
 
   app.post("/api/auth/login", async (request, reply) => {
     const body = (request.body ?? {}) as LoginBody;

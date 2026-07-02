@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-VERSION="1.1.0-alpha.6"
+VERSION="1.1.0-alpha.7"
 
 BASE_DIR="/opt/svobodanet"
 CONFIG="/opt/svobodanet/config/svnet.conf"
@@ -2063,7 +2063,7 @@ admin_set_env_default() {
 }
 
 admin_prepare_env() {
-  local env_src env_dst postgres_user postgres_db postgres_password jwt_secret setup_token setup_token_created=0 database_url
+  local env_src env_dst postgres_user postgres_db postgres_password jwt_secret database_url
   env_src="$(admin_module_dir)/.env.example"
   env_dst="$(admin_env_file)"
 
@@ -2096,15 +2096,6 @@ admin_prepare_env() {
     postgres_password="$(admin_env_value POSTGRES_PASSWORD)"
   fi
 
-  if admin_env_missing_or_placeholder ADMIN_SETUP_TOKEN; then
-    setup_token="$(admin_random_secret 18)"
-    admin_set_env_value ADMIN_SETUP_TOKEN "$setup_token"
-    setup_token_created=1
-    ok "ADMIN_SETUP_TOKEN сгенерирован."
-  else
-    setup_token="$(admin_env_value ADMIN_SETUP_TOKEN)"
-  fi
-
   admin_set_env_default NODE_ENV production
   admin_set_env_default FRONTEND_PORT "${FRONTEND_PORT:-3000}"
   admin_set_env_default BACKEND_PORT "${BACKEND_PORT:-3001}"
@@ -2128,8 +2119,6 @@ admin_prepare_env() {
   fi
 
   chmod 600 "$env_dst" 2>/dev/null || true
-  ADMIN_SETUP_TOKEN_CREATED="$setup_token_created"
-  ADMIN_SETUP_TOKEN_VALUE="$setup_token"
 }
 
 admin_port() {
@@ -2952,11 +2941,10 @@ admin_install() {
 
   echo
   admin_print_access
-  if [[ "${ADMIN_SETUP_TOKEN_CREATED:-0}" == "1" ]]; then
-    echo
-    echo "Первичная настройка:"
-    echo "Setup token: $ADMIN_SETUP_TOKEN_VALUE"
-  fi
+  echo
+  echo "Первичная настройка:"
+  echo "- Откройте http://svnet.local/setup после включения доступа из домашней сети."
+  echo "- Setup token больше не нужен: первого администратора создайте прямо в браузере."
 }
 
 admin_status() {
@@ -3118,6 +3106,23 @@ admin_reset_password() {
   return "$rc"
 }
 
+admin_reset_setup() {
+  require_root || return 1
+  load_config
+
+  warn "Это developer recovery: существующие admin users будут удалены, и /setup снова станет доступен."
+  warn "OpenVPN, MikroTik, firewall, .env и Docker volumes не будут удалены."
+  confirm_word "Подтвердите сброс первичной настройки Admin Panel." "RESET_SETUP" || return 0
+
+  run_admin_compose up -d postgres || return 1
+  run_admin_compose build backend || return 1
+  export SVNET_ADMIN_RESET_SETUP="RESET_SETUP"
+  run_admin_compose run --rm -e SVNET_ADMIN_RESET_SETUP backend node dist/adminCli.js reset-setup
+  local rc=$?
+  unset SVNET_ADMIN_RESET_SETUP
+  return "$rc"
+}
+
 admin_access_menu() {
   local choice
   while true; do
@@ -3156,7 +3161,8 @@ admin_menu() {
     menu_item "8" "Удалить Admin Panel" "Остановить containers; удаление volumes/data только по отдельному подтверждению."
     menu_item "9" "Показать логи" "Показать последние 120 строк docker compose logs."
     menu_item "10" "Сбросить пароль администратора" "Задать новый пароль и обновить bcrypt hash в PostgreSQL."
-    menu_item "11" "Настроить доступ из домашней сети" "Включить или отключить http://svnet.local через VPN tunnel, без public IP."
+    menu_item "11" "Сбросить первичную настройку" "Developer recovery: удалить admin users и снова открыть /setup."
+    menu_item "12" "Настроить доступ из домашней сети" "Включить или отключить http://svnet.local через VPN tunnel, без public IP."
     menu_item "0" "Назад" "Вернуться в главное меню."
     echo
     read -r -p "Выберите пункт: " choice || return 0
@@ -3171,7 +3177,8 @@ admin_menu() {
       8) admin_remove; pause ;;
       9) admin_logs; pause ;;
       10) admin_reset_password; pause ;;
-      11) admin_access_menu ;;
+      11) admin_reset_setup; pause ;;
+      12) admin_access_menu ;;
       0) return 0 ;;
       *) warn "Неверный пункт."; sleep 1 ;;
     esac
@@ -3910,6 +3917,8 @@ Usage:
   svnet --admin-logs      show Admin Panel logs
   svnet --admin-reset-password
                            reset Admin Panel admin password
+  svnet --admin-reset-setup
+                           developer recovery: reopen first-run setup
   svnet --admin-access-status
                            show Admin Panel local/VPN-LAN access status
   svnet --admin-enable-lan-access
@@ -3991,6 +4000,9 @@ main() {
       ;;
     --admin-reset-password)
       admin_reset_password
+      ;;
+    --admin-reset-setup)
+      admin_reset_setup
       ;;
     --admin-access-status)
       admin_access_status

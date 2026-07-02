@@ -1,4 +1,4 @@
-# SVNET Admin Panel v1.1.0-alpha.6
+# SVNET Admin Panel v1.1.0-alpha.7
 
 Первый MVP веб-панели для СвободаNET. Модуль живёт отдельно от стабильного CLI и вызывает только allowlist-команды `svnet`.
 
@@ -15,17 +15,23 @@
 sudo svnet --admin-install
 ```
 
-Если Docker или Docker Compose plugin отсутствуют, `svnet` предложит установить их автоматически через `apt`. После подготовки скрипт предложит сразу запустить containers и покажет локальный URL, способ включить домашний доступ и setup token.
+Если Docker или Docker Compose plugin отсутствуют, `svnet` предложит установить их автоматически через `apt`. После подготовки скрипт предложит сразу запустить containers и покажет локальный URL и способ включить домашний доступ.
 
 ## Первичная настройка
 
-Откройте:
+Основной пользовательский вход после включения LAN access:
 
 ```text
-http://127.0.0.1:3000/setup
+http://svnet.local/setup
 ```
 
-Введите setup token из вывода `svnet --admin-install`, затем создайте admin username/password. Пароль хешируется backend-ом и сохраняется в PostgreSQL.
+Также можно открыть:
+
+```text
+http://10.88.0.1/setup
+```
+
+Setup token больше не нужен. В браузере введите `Admin username`, `Admin password`, `Repeat password` и нажмите `Создать администратора`. Backend создаёт первого admin только если admin users ещё нет, запрос пришёл из `127.0.0.1/32` или `10.88.0.0/24`, а Host равен `svnet.local`, `10.88.0.1`, `127.0.0.1` или `localhost`.
 
 ## Lifecycle
 
@@ -39,6 +45,7 @@ sudo svnet --admin-reinstall
 sudo svnet --admin-remove
 sudo svnet --admin-logs
 sudo svnet --admin-reset-password
+sudo svnet --admin-reset-setup
 ```
 
 Панель после установки слушает только `127.0.0.1:3000` и `127.0.0.1:3001`.
@@ -78,6 +85,8 @@ ssh -L 3000:127.0.0.1:3000 root@SERVER_IP
 
 - Backend не принимает произвольные shell-команды.
 - Все вызовы `svnet` идут через allowlist в `backend/src/svnetCli.ts`.
+- First-run setup не требует token и работает только из trusted network/Host.
+- Setup create endpoint имеет rate limit, username validation и минимальную длину пароля 12 символов.
 - `publish-on`, `publish-off`, `safe update`, `backup create` требуют confirmation.
 - Dangerous actions пишутся в PostgreSQL `action_log`.
 - HTTP publish должен оставаться в offline secure mode после настройки MikroTik.
@@ -86,6 +95,22 @@ ssh -L 3000:127.0.0.1:3000 root@SERVER_IP
 - Admin Panel не открывается на `0.0.0.0` по умолчанию.
 - Доступ из домашней сети работает только через nginx на `10.88.0.1:80` и firewall rule для `tun-svnet`.
 - `default*` nginx sites должны быть вне `/etc/nginx/sites-enabled`, если они открывают wildcard/public TCP `80`.
+
+## Recovery
+
+Сбросить пароль существующего admin:
+
+```bash
+sudo svnet --admin-reset-password
+```
+
+Снова открыть first-run setup:
+
+```bash
+sudo svnet --admin-reset-setup
+```
+
+`--admin-reset-setup` требует подтверждение словом `RESET_SETUP`, удаляет admin users из PostgreSQL и не удаляет `.env`, Docker volumes, OpenVPN, MikroTik configs или firewall.
 
 ## Что пока read-only
 

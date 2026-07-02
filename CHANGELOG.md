@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 1.1.0-alpha.7 - 2026-07-02
+
+- Переделан first-run setup Admin Panel: `/setup` больше не требует `ADMIN_SETUP_TOKEN`, первый администратор создаётся прямо в браузере.
+- Backend `POST /api/setup/create` создаёт первого admin только при пустой базе, trusted network (`127.0.0.1/32`, `10.88.0.0/24`) и разрешённом Host (`svnet.local`, `10.88.0.1`, `127.0.0.1`, `localhost`).
+- Добавлены setup rate limit, username validation и минимальная длина пароля 12 символов; пароль/token не пишутся в action log.
+- `/api/setup/status` теперь отдаёт `setupRequired`, а frontend автоматически переводит пользователя на `/setup`, если admin ещё не создан.
+- `ADMIN_SETUP_TOKEN` убран из основного `.env.example` flow и оставлен только как legacy/developer fallback comment.
+- Добавлена recovery-команда `svnet --admin-reset-setup`; `--admin-reset-password` обновляет пароль существующего admin без ручного редактирования `.env`.
+- Документация Admin Panel обновлена под основной вход через `http://svnet.local` и создание администратора в браузере.
+
 ## 1.1.0-alpha.6 - 2026-07-02
 
 - `svnet --publish-status` теперь показывает systemd unit для PID, который слушает HTTP publish port `8088`.

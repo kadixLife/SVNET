@@ -24,7 +24,6 @@ export const config = {
   host: process.env.HOST ?? "0.0.0.0",
   port: numberFromEnv("PORT", 3001),
   frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:3000",
-  adminSetupToken: required("ADMIN_SETUP_TOKEN"),
   jwtSecret: required("JWT_SECRET"),
   authCookieName: process.env.AUTH_COOKIE_NAME ?? "svnet_admin_session",
   cookieSecure: process.env.COOKIE_SECURE === "true",

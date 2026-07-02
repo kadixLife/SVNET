@@ -46,16 +46,40 @@ export async function getAdminUser(username: string): Promise<{ username: string
   };
 }
 
-export async function upsertAdminUser(username: string, passwordHash: string): Promise<void> {
-  await pool.query(
-    `
-      insert into admin_users (username, password_hash)
-      values ($1, $2)
-      on conflict (username)
-      do update set password_hash = excluded.password_hash, updated_at = now()
-    `,
+export async function createFirstAdminUser(username: string, passwordHash: string): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("lock table admin_users in exclusive mode");
+
+    const existing = await client.query("select 1 from admin_users limit 1");
+    if (existing.rows.length > 0) {
+      await client.query("rollback");
+      return false;
+    }
+
+    await client.query("insert into admin_users (username, password_hash) values ($1, $2)", [username, passwordHash]);
+    await client.query("commit");
+    return true;
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function updateAdminPassword(username: string, passwordHash: string): Promise<boolean> {
+  const result = await pool.query(
+    "update admin_users set password_hash = $2, updated_at = now() where username = $1",
     [username, passwordHash]
   );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function deleteAdminUsers(): Promise<number> {
+  const result = await pool.query("delete from admin_users");
+  return result.rowCount ?? 0;
 }
 
 export async function logAction(actor: string, action: string, result: string, details: unknown): Promise<void> {

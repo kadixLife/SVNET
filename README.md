@@ -2,7 +2,7 @@
 
 СвободаNET - это менеджер для Ubuntu VPS и MikroTik. Он поднимает OpenVPN на сервере, готовит конфиги для MikroTik и помогает настроить split-routing: часть трафика идёт напрямую, часть через VPN.
 
-Текущая версия проекта: `1.1.0-alpha.6`.
+Текущая версия проекта: `1.1.0-alpha.7`.
 
 Важно: базовый CLI уже используется как рабочая основа. Web Admin Panel находится в alpha-ветке и должна включаться осознанно.
 
@@ -390,6 +390,8 @@ sudo svnet --admin-access-status
 http://svnet.local
 ```
 
+При первом запуске панель сама откроет `/setup`. Setup token больше не нужен: создайте администратора прямо в браузере, указав `Admin username`, `Admin password` и `Repeat password`.
+
 Безопасное состояние для LAN access:
 
 ```text
@@ -451,6 +453,7 @@ sudo svnet --admin-stop
 | `sudo svnet --admin-stop` | Останавливает containers без удаления данных. |
 | `sudo svnet --admin-logs` | Показывает логи Admin Panel. |
 | `sudo svnet --admin-reset-password` | Сбрасывает пароль администратора. |
+| `sudo svnet --admin-reset-setup` | Developer recovery: удаляет admin users и снова открывает `/setup` после подтверждения. |
 | `sudo svnet --admin-enable-lan-access` | Включает доступ к панели из домашней сети через VPN. |
 | `sudo svnet --admin-disable-lan-access` | Выключает LAN access к панели. |
 | `sudo svnet --admin-fix-nginx-bind` | Исправляет небезопасный nginx bind на public/wildcard `:80`. |

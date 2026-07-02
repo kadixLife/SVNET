@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { initDb, logAction, pool, upsertAdminUser } from "./db";
+import { deleteAdminUsers, initDb, logAction, pool, updateAdminPassword } from "./db";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -22,9 +22,24 @@ async function resetPassword() {
   }
 
   const hash = await bcrypt.hash(password, 12);
-  await upsertAdminUser(username, hash);
+  const updated = await updateAdminPassword(username, hash);
+  if (!updated) {
+    throw new Error(`Admin user not found: ${username}`);
+  }
+
   await logAction("cli", "admin-reset-password", "success", { username });
   console.log(`Admin password updated for ${username}`);
+}
+
+async function resetSetup() {
+  const marker = requiredEnv("SVNET_ADMIN_RESET_SETUP");
+  if (marker !== "RESET_SETUP") {
+    throw new Error("SVNET_ADMIN_RESET_SETUP confirmation is invalid");
+  }
+
+  const deletedAdmins = await deleteAdminUsers();
+  await logAction("cli", "admin-reset-setup", "success", { deletedAdmins });
+  console.log(`Admin setup reset. Deleted admin users: ${deletedAdmins}`);
 }
 
 async function main() {
@@ -32,6 +47,11 @@ async function main() {
   const command = process.argv[2];
   if (command === "reset-password") {
     await resetPassword();
+    return;
+  }
+
+  if (command === "reset-setup") {
+    await resetSetup();
     return;
   }
 
