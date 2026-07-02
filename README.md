@@ -150,7 +150,7 @@ sudo svnet --publish-off
 
 ## GUI Admin Panel
 
-Начиная с `v1.1.0-alpha.2` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log, first-run setup wizard и безопасный wrapper вокруг `svnet`.
+Начиная с `v1.1.0-alpha.3` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log, first-run setup wizard и безопасный wrapper вокруг `svnet`.
 
 ```bash
 sudo svnet --admin-install

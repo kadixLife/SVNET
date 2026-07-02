@@ -1,6 +1,6 @@
 # SVNET Admin Panel
 
-SVNET Admin Panel v1.1.0-alpha.2 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall напрямую. Все dangerous actions выполняются только через allowlist команд `svnet`.
+SVNET Admin Panel v1.1.0-alpha.3 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall напрямую. Все dangerous actions выполняются только через allowlist команд `svnet`.
 
 ## Автоматическая установка
 

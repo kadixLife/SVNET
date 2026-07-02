@@ -1,4 +1,4 @@
-# SVNET Admin Panel v1.1.0-alpha.2
+# SVNET Admin Panel v1.1.0-alpha.3
 
 Первый MVP веб-панели для СвободаNET. Модуль живёт отдельно от стабильного CLI и вызывает только allowlist-команды `svnet`.
 

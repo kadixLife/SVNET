@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 1.1.0-alpha.3 - 2026-07-02
+
+- Исправлена совместимость Admin Panel Docker Compose с legacy `docker-compose v1.29.2`: удалено top-level `name`, добавлено `version: "3.8"`, `depends_on.condition` заменён на простой `depends_on`.
+- Project name теперь задаётся CLI через `-p svnet-admin`, а compose file передаётся явно через `-f /opt/svobodanet/repo/admin/docker-compose.yml`.
+- Исправлена обработка `docker compose config`: при ошибке выводится `[FAIL]`, последние строки stderr, установка/запуск останавливаются.
+- `svnet --admin-status` показывает реализацию Compose: `docker compose v2.x` или `docker-compose v1.x`.
+- Backend получил retry ожидания PostgreSQL, чтобы работать без `depends_on.condition`.
+- Добавлен тест `tests/admin-compose-config.sh` для проверки Compose v2 и v1, если они доступны.
+
 ## 1.1.0-alpha.2 - 2026-07-02
 
 - Переделан lifecycle GUI Admin Panel: добавлены install/status/start/stop/restart/update/reinstall/remove/logs/reset-password команды и отдельное меню.

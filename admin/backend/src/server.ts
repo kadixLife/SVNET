@@ -202,7 +202,7 @@ async function registerRoutes() {
   app.get("/api/health", async () => ({
     ok: true,
     service: "svnet-admin-backend",
-    version: "1.1.0-alpha.2"
+    version: "1.1.0-alpha.3"
   }));
 
   app.get("/api/setup/status", async () => ({
@@ -366,8 +366,28 @@ async function registerRoutes() {
   });
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function initDbWithRetry(): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 30; attempt += 1) {
+    try {
+      await initDb();
+      return;
+    } catch (error) {
+      lastError = error;
+      app.log.warn({ attempt, error }, "Database is not ready yet");
+      await sleep(2_000);
+    }
+  }
+
+  throw lastError;
+}
+
 async function start() {
-  await initDb();
+  await initDbWithRetry();
   await registerRoutes();
   await app.listen({ host: config.host, port: config.port });
 }

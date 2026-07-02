@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-VERSION="1.1.0-alpha.2"
+VERSION="1.1.0-alpha.3"
 
 BASE_DIR="/opt/svobodanet"
 CONFIG="/opt/svobodanet/config/svnet.conf"
@@ -1651,13 +1651,17 @@ admin_env_file() {
   printf '%s/.env\n' "$ADMIN_DIR"
 }
 
+admin_compose_file() {
+  printf '%s/docker-compose.yml\n' "$(admin_module_dir)"
+}
+
 admin_compose_command() {
   if command_exists docker && docker compose version >/dev/null 2>&1; then
     printf '%s\n' "docker compose"
     return 0
   fi
 
-  if command_exists docker-compose; then
+  if command_exists docker-compose && docker-compose version >/dev/null 2>&1; then
     printf '%s\n' "docker-compose"
     return 0
   fi
@@ -1666,18 +1670,38 @@ admin_compose_command() {
 }
 
 admin_compose_available() {
-  command_exists docker && docker compose version >/dev/null 2>&1
+  admin_compose_command >/dev/null 2>&1
+}
+
+admin_compose_display() {
+  local version
+  if command_exists docker && docker compose version >/dev/null 2>&1; then
+    version="$(docker compose version --short 2>/dev/null || docker compose version 2>/dev/null | awk '{print $NF; exit}')"
+    version="${version#v}"
+    printf 'docker compose v%s\n' "${version:-unknown}"
+    return 0
+  fi
+
+  if command_exists docker-compose && docker-compose version >/dev/null 2>&1; then
+    version="$(docker-compose version --short 2>/dev/null || docker-compose version 2>/dev/null | head -n1 | sed -E 's/.*version ([^, ]+).*/\1/')"
+    version="${version#v}"
+    printf 'docker-compose v%s\n' "${version:-unknown}"
+    return 0
+  fi
+
+  return 1
 }
 
 run_admin_compose() {
-  local admin_repo env_file
+  local admin_repo env_file compose_file
   local compose=()
   admin_repo="$(admin_module_dir)"
   env_file="$(admin_env_file)"
+  compose_file="$(admin_compose_file)"
 
   if command_exists docker && docker compose version >/dev/null 2>&1; then
     compose=(docker compose)
-  elif command_exists docker-compose; then
+  elif command_exists docker-compose && docker-compose version >/dev/null 2>&1; then
     compose=(docker-compose)
   else
     fail "Docker Compose не найден."
@@ -1689,6 +1713,11 @@ run_admin_compose() {
     return 1
   fi
 
+  if [[ ! -f "$compose_file" ]]; then
+    fail "Compose file не найден: $compose_file"
+    return 1
+  fi
+
   if [[ ! -f "$env_file" ]]; then
     fail "Admin .env не найден: $env_file"
     echo "Сначала выполните: sudo svnet --admin-install"
@@ -1697,7 +1726,7 @@ run_admin_compose() {
 
   (
     cd "$admin_repo" || exit 1
-    SVNET_ADMIN_ENV_FILE="$env_file" "${compose[@]}" --env-file "$env_file" "$@"
+    SVNET_ADMIN_ENV_FILE="$env_file" "${compose[@]}" -p svnet-admin -f "$compose_file" --env-file "$env_file" "$@"
   )
 }
 
@@ -1772,10 +1801,10 @@ admin_ensure_docker() {
 
 admin_ensure_compose() {
   local dry_run="${1:-}"
-  local compose_name
-  compose_name="$(admin_compose_command 2>/dev/null || true)"
-  if [[ -n "$compose_name" ]]; then
-    ok "Docker Compose: $compose_name"
+  local compose_display
+  compose_display="$(admin_compose_display 2>/dev/null || true)"
+  if [[ -n "$compose_display" ]]; then
+    ok "Docker Compose: $compose_display"
     return 0
   fi
 
@@ -2007,8 +2036,17 @@ admin_check_prereqs() {
 }
 
 admin_compose_config_check() {
+  local err_file
+  err_file="$(mktemp)"
   info "Проверяю docker compose config..."
-  run_admin_compose config >/dev/null
+  if ! run_admin_compose config >/dev/null 2>"$err_file"; then
+    fail "docker compose config failed"
+    echo "Последние строки ошибки:"
+    tail -n 40 "$err_file" 2>/dev/null || true
+    rm -f "$err_file"
+    return 1
+  fi
+  rm -f "$err_file"
   ok "docker compose config: OK"
 }
 
@@ -2018,7 +2056,7 @@ admin_install() {
 
   local dry_run="${1:-}"
 
-  echo "GUI Admin Panel v1.1.0-alpha.2"
+  echo "GUI Admin Panel v1.1.0-alpha.3"
   echo
 
   admin_check_prereqs "$dry_run" || return 1
@@ -2054,10 +2092,10 @@ admin_install() {
 admin_status() {
   load_config
 
-  local admin_repo env_file compose_name frontend_code backend_code
+  local admin_repo env_file compose_display frontend_code backend_code
   admin_repo="$(admin_module_dir)"
   env_file="$(admin_env_file)"
-  compose_name="$(admin_compose_command 2>/dev/null || true)"
+  compose_display="$(admin_compose_display 2>/dev/null || true)"
   frontend_code="$(admin_http_code "$(admin_frontend_url)")"
   backend_code="$(admin_http_code "$(admin_backend_url)")"
 
@@ -2067,7 +2105,7 @@ admin_status() {
   echo "Data path: $ADMIN_DIR"
   [[ -f "$env_file" ]] && echo "Env: exists" || echo "Env: missing"
   command_exists docker && echo "Docker: installed" || echo "Docker: missing"
-  [[ -n "$compose_name" ]] && echo "Docker Compose: installed ($compose_name)" || echo "Docker Compose: missing"
+  [[ -n "$compose_display" ]] && echo "Docker Compose: installed ($compose_display)" || echo "Docker Compose: missing"
   echo
 
   echo "Containers:"
@@ -2095,6 +2133,7 @@ admin_start() {
   }
   admin_ensure_docker || return 1
   admin_ensure_compose || return 1
+  admin_compose_config_check || return 1
   run_admin_compose up -d || return 1
   admin_wait_health || true
   admin_print_access
@@ -2118,6 +2157,7 @@ admin_update() {
   require_root || return 1
   load_config
   warn "Будут обновлены только admin containers. OpenVPN, MikroTik и firewall не трогаются."
+  admin_compose_config_check || return 1
   run_admin_compose pull || true
   run_admin_compose up -d --build || return 1
   admin_wait_health || true
@@ -2137,6 +2177,7 @@ admin_reinstall() {
   warn "Переустановка пересоздаст containers, но не удалит volumes без отдельного подтверждения."
   confirm "Продолжить переустановку Admin Panel?" || return 0
   admin_backup_data_dir || return 1
+  admin_compose_config_check || return 1
   run_admin_compose down || true
   run_admin_compose up -d --build || return 1
   admin_wait_health || true
