@@ -1,6 +1,6 @@
 # SVNET Admin Panel
 
-SVNET Admin Panel v1.1.0-alpha.4 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall без явной команды. Все dangerous actions выполняются только через allowlist команд `svnet`.
+SVNET Admin Panel v1.1.0-alpha.5 - отдельный web-модуль поверх стабильного CLI `svnet`. Он не меняет OpenVPN, MikroTik или firewall без явной команды. Все dangerous actions выполняются только через allowlist команд `svnet`.
 
 ## Автоматическая установка
 
@@ -105,6 +105,14 @@ sudo svnet --admin-access-status
 
 Public IP и `0.0.0.0:80` не должны слушать Admin Panel. Если `svnet --admin-access-status` видит wildcard/public listener, это warning, который нужно исправить перед production.
 
+Аварийное исправление nginx bind после старой alpha-версии:
+
+```bash
+sudo svnet --admin-fix-nginx-bind
+```
+
+Команда переносит `default*` из `/etc/nginx/sites-enabled` в `/etc/nginx/svnet-disabled`, пересоздаёт `svnet-admin.conf`, проверяет `nginx -T`, reload nginx, `ss` и public IP curl.
+
 Отключить домашний доступ:
 
 ```bash
@@ -154,6 +162,7 @@ sudo svnet --admin-reset-password
 sudo svnet --admin-access-status
 sudo svnet --admin-enable-lan-access
 sudo svnet --admin-disable-lan-access
+sudo svnet --admin-fix-nginx-bind
 ```
 
 `--admin-stop` выполняет `docker compose down`, но не удаляет volumes, `.env` и PostgreSQL данные.

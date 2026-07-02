@@ -1,6 +1,6 @@
 server {
     listen 10.88.0.1:80;
-    server_name svnet.local;
+    server_name svnet.local 10.88.0.1;
 
     client_max_body_size 2m;
 

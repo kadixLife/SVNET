@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-VERSION="1.1.0-alpha.4"
+VERSION="1.1.0-alpha.5"
 
 BASE_DIR="/opt/svobodanet"
 CONFIG="/opt/svobodanet/config/svnet.conf"
@@ -18,6 +18,7 @@ ADMIN_ACCESS_HOST="svnet.local"
 ADMIN_HTTP_PORT="80"
 ADMIN_NGINX_AVAILABLE="/etc/nginx/sites-available/svnet-admin.conf"
 ADMIN_NGINX_ENABLED="/etc/nginx/sites-enabled/svnet-admin.conf"
+ADMIN_NGINX_DISABLED_DIR="/etc/nginx/svnet-disabled"
 ADMIN_FIREWALL_COMMENT="SVNET Admin LAN access"
 
 OVPN_SERVICE="openvpn-server@svnet"
@@ -2000,16 +2001,27 @@ admin_vpn_http_listener_lines() {
   admin_http80_ss_lines | grep -F "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}" || true
 }
 
+admin_wildcard_http_listener_lines() {
+  admin_http80_ss_lines | grep -E "(^|[[:space:]])(0\.0\.0\.0:${ADMIN_HTTP_PORT}|\*:${ADMIN_HTTP_PORT}|\[::\]:${ADMIN_HTTP_PORT}|:::${ADMIN_HTTP_PORT})([[:space:]]|$)" || true
+}
+
 admin_public_http_listener_lines() {
   local server_ip lines
   server_ip="$(get_server_ip)"
   lines="$(admin_http80_ss_lines)"
   {
-    printf '%s\n' "$lines" | grep -E "(^|[[:space:]])(0\.0\.0\.0:${ADMIN_HTTP_PORT}|\*:${ADMIN_HTTP_PORT}|\[::\]:${ADMIN_HTTP_PORT}|:::${ADMIN_HTTP_PORT})[[:space:]]" || true
+    admin_wildcard_http_listener_lines
     if [[ -n "$server_ip" && "$server_ip" != "SERVER_IP" && "$server_ip" != "$VPN_SERVER_IP" ]]; then
       printf '%s\n' "$lines" | grep -F "${server_ip}:${ADMIN_HTTP_PORT}" || true
     fi
   } | sort -u
+}
+
+admin_unexpected_http80_listener_lines() {
+  local lines
+  lines="$(admin_http80_ss_lines)"
+  [[ -n "$lines" ]] || return 0
+  printf '%s\n' "$lines" | grep -vF "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}" || true
 }
 
 admin_http80_pids() {
@@ -2034,6 +2046,34 @@ admin_nginx_active() {
   command_exists systemctl && systemctl is-active --quiet nginx
 }
 
+admin_public_ip_http_code() {
+  local server_ip code
+  server_ip="$(get_server_ip)"
+  if [[ -z "$server_ip" || "$server_ip" == "SERVER_IP" || "$server_ip" == "$VPN_SERVER_IP" ]]; then
+    printf '%s\n' "skipped"
+    return 0
+  fi
+
+  if ! command_exists curl; then
+    printf '%s\n' "curl-missing"
+    return 0
+  fi
+
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -I --connect-timeout 3 --max-time 5 "http://${server_ip}" 2>/dev/null || true)"
+  printf '%s\n' "${code:-000}"
+}
+
+admin_warn_http_publish_listener() {
+  load_config
+  if http_port_is_listening; then
+    warn "HTTP publish ${HTTP_PORT} сейчас слушает. Admin LAN access не зависит от 8088."
+    echo "Если публикация конфигов не нужна, отключите её:"
+    echo "sudo svnet --publish-off"
+  else
+    ok "HTTP publish ${HTTP_PORT}: offline or not listening"
+  fi
+}
+
 admin_ensure_nginx() {
   if command_exists nginx; then
     ok "nginx: installed"
@@ -2054,20 +2094,54 @@ admin_ensure_nginx() {
   ok "nginx установлен."
 }
 
-admin_disable_nginx_default_site() {
-  local default_site backup
-  default_site="/etc/nginx/sites-enabled/default"
+admin_move_nginx_default_sites() {
+  local mode="${1:-all}"
+  local f base dest moved=0
 
-  if [[ ! -e "$default_site" ]]; then
+  mkdir -p "$ADMIN_NGINX_DISABLED_DIR"
+  shopt -s nullglob
+  for f in /etc/nginx/sites-enabled/default*; do
+    [[ -e "$f" ]] || continue
+    base="$(basename "$f")"
+    if [[ "$mode" == "svnet-only" && "$base" != default.svnet-disabled_* ]]; then
+      continue
+    fi
+    dest="$ADMIN_NGINX_DISABLED_DIR/$base"
+    if [[ -e "$dest" ]]; then
+      dest="$ADMIN_NGINX_DISABLED_DIR/${base}.$(date +%F_%H-%M-%S).$$"
+    fi
+    mv -f "$f" "$dest" || {
+      shopt -u nullglob
+      return 1
+    }
+    ok "nginx default site moved out of sites-enabled: $dest"
+    moved=1
+  done
+  shopt -u nullglob
+
+  if [[ "$moved" == "0" ]]; then
+    if [[ "$mode" == "svnet-only" ]]; then
+      ok "nginx SVNET-created default backups: not present in sites-enabled"
+    else
+      ok "nginx sites-enabled/default*: not present"
+    fi
+  fi
+}
+
+admin_disable_nginx_default_sites() {
+  local defaults
+  shopt -s nullglob
+  defaults=(/etc/nginx/sites-enabled/default*)
+  shopt -u nullglob
+
+  if (( ${#defaults[@]} == 0 )); then
+    ok "nginx default sites: not present in sites-enabled"
     return 0
   fi
 
-  warn "Найден nginx default site. Он часто слушает 0.0.0.0:80 и может открыть public HTTP."
-  confirm "Отключить default site для безопасного доступа только через VPN?" || return 1
-
-  backup="/etc/nginx/sites-enabled/default.svnet-disabled_$(date +%F_%H-%M-%S)"
-  mv -f "$default_site" "$backup" || return 1
-  ok "nginx default site отключён: $backup"
+  warn "Найдены nginx default* sites. Они часто слушают 0.0.0.0:80 или [::]:80."
+  confirm "Переместить default* из sites-enabled в $ADMIN_NGINX_DISABLED_DIR?" || return 1
+  admin_move_nginx_default_sites all
 }
 
 admin_write_nginx_config() {
@@ -2079,7 +2153,7 @@ admin_write_nginx_config() {
   cat > "$ADMIN_NGINX_AVAILABLE" <<NGINX
 server {
     listen ${VPN_SERVER_IP}:${ADMIN_HTTP_PORT};
-    server_name ${ADMIN_ACCESS_HOST};
+    server_name ${ADMIN_ACCESS_HOST} ${VPN_SERVER_IP};
 
     client_max_body_size 2m;
 
@@ -2109,6 +2183,35 @@ NGINX
   ok "nginx config: $ADMIN_NGINX_AVAILABLE"
 }
 
+admin_nginx_forbidden_listens_from_dump() {
+  local dump_file="$1"
+  grep -En '^[[:space:]]*listen[[:space:]]+(80|0\.0\.0\.0:80|\*:80|\[::\]:80)([[:space:];]|$)' "$dump_file" 2>/dev/null || true
+}
+
+admin_nginx_bind_preflight() {
+  local dump_file err_file forbidden
+  dump_file="$(mktemp)"
+  err_file="$(mktemp)"
+
+  if ! nginx -T > "$dump_file" 2>"$err_file"; then
+    fail "nginx -T failed"
+    tail -n 40 "$err_file" 2>/dev/null || true
+    rm -f "$dump_file" "$err_file"
+    return 1
+  fi
+
+  forbidden="$(admin_nginx_forbidden_listens_from_dump "$dump_file")"
+  if [[ -n "$forbidden" ]]; then
+    fail "nginx config contains forbidden public/wildcard :${ADMIN_HTTP_PORT} listen"
+    printf '%s\n' "$forbidden"
+    rm -f "$dump_file" "$err_file"
+    return 1
+  fi
+
+  rm -f "$dump_file" "$err_file"
+  ok "nginx bind preflight: no wildcard/default :${ADMIN_HTTP_PORT} listen"
+}
+
 admin_reload_nginx() {
   nginx -t || {
     fail "nginx config test failed"
@@ -2127,6 +2230,11 @@ admin_reload_nginx() {
   fi
 
   ok "nginx reloaded"
+}
+
+admin_reload_nginx_secure() {
+  admin_nginx_bind_preflight || return 1
+  admin_reload_nginx || return 1
 }
 
 persist_iptables_rules() {
@@ -2244,11 +2352,11 @@ admin_print_mikrotik_apply_hint() {
 }
 
 admin_verify_lan_access() {
-  local code public_lines problems=0
+  local code public_code public_lines unexpected_lines problems=0
 
   code="$(http_status_code "http://${VPN_SERVER_IP}")"
-  if [[ "$code" == "200" ]]; then
-    ok "curl http://${VPN_SERVER_IP}: 200 OK"
+  if [[ "$code" == "200" || "$code" == "302" ]]; then
+    ok "curl http://${VPN_SERVER_IP}: HTTP $code"
   else
     fail "curl http://${VPN_SERVER_IP}: HTTP $code"
     ((problems++))
@@ -2261,6 +2369,15 @@ admin_verify_lan_access() {
     ((problems++))
   fi
 
+  unexpected_lines="$(admin_unexpected_http80_listener_lines)"
+  if [[ -n "$unexpected_lines" ]]; then
+    fail "Unexpected :${ADMIN_HTTP_PORT} listener found. Allowed only ${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}."
+    printf '%s\n' "$unexpected_lines"
+    ((problems++))
+  else
+    ok "No unexpected :${ADMIN_HTTP_PORT} listener"
+  fi
+
   public_lines="$(admin_public_http_listener_lines)"
   if [[ -n "$public_lines" ]]; then
     fail "Public IP/${ADMIN_HTTP_PORT}: найден listener. Admin Panel не должен слушать public HTTP."
@@ -2270,20 +2387,38 @@ admin_verify_lan_access() {
     ok "Public IP:${ADMIN_HTTP_PORT}: not listening"
   fi
 
+  public_code="$(admin_public_ip_http_code)"
+  case "$public_code" in
+    000)
+      ok "curl public IP:${ADMIN_HTTP_PORT}: refused/timeout"
+      ;;
+    skipped)
+      warn "curl public IP:${ADMIN_HTTP_PORT}: skipped, public IP не определён"
+      ;;
+    curl-missing)
+      warn "curl public IP:${ADMIN_HTTP_PORT}: curl не найден"
+      ;;
+    *)
+      fail "curl public IP:${ADMIN_HTTP_PORT}: HTTP $public_code"
+      ((problems++))
+      ;;
+  esac
+
   return "$problems"
 }
 
 admin_access_status() {
   load_config
 
-  local mode frontend_code backend_code public_lines
+  local mode frontend_code backend_code vpn_code public_code public_lines wildcard_lines unexpected_lines
   mode="$(admin_access_mode)"
   frontend_code="$(http_status_code "$(admin_frontend_url)")"
   backend_code="$(http_status_code "$(admin_backend_url)")"
+  vpn_code="$(http_status_code "http://${VPN_SERVER_IP}")"
 
   echo "SVNET Admin Panel access status"
   echo
-  echo "Mode: $mode"
+  ok "Mode: $mode"
   echo "Access modes:"
   echo "- local-only: only 127.0.0.1, default after install"
   echo "- vpn-lan: ${VPN_SERVER_IP}:${ADMIN_HTTP_PORT} + 127.0.0.1"
@@ -2313,11 +2448,31 @@ admin_access_status() {
     ok "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}: listening"
     admin_print_http80_processes
   else
-    if [[ "$mode" == "vpn-lan" ]]; then
+    wildcard_lines="$(admin_wildcard_http_listener_lines)"
+    if [[ "$vpn_code" == "200" || "$vpn_code" == "302" ]] && [[ -n "$wildcard_lines" ]]; then
+      fail "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}: responds through wildcard binding, insecure"
+      printf '%s\n' "$wildcard_lines"
+    elif [[ "$mode" == "vpn-lan" ]]; then
       fail "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}: not listening"
     else
       ok "${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}: not listening"
     fi
+  fi
+
+  unexpected_lines="$(admin_unexpected_http80_listener_lines)"
+  if [[ -n "$unexpected_lines" ]]; then
+    warn "Unexpected :${ADMIN_HTTP_PORT} listener found. Allowed Admin bind is ${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}."
+    printf '%s\n' "$unexpected_lines"
+  else
+    ok "No unexpected :${ADMIN_HTTP_PORT} listener"
+  fi
+
+  wildcard_lines="$(admin_wildcard_http_listener_lines)"
+  if [[ -n "$wildcard_lines" ]]; then
+    fail "Wildcard :${ADMIN_HTTP_PORT} listener found"
+    printf '%s\n' "$wildcard_lines"
+  else
+    ok "No wildcard :${ADMIN_HTTP_PORT} listener"
   fi
 
   public_lines="$(admin_public_http_listener_lines)"
@@ -2327,6 +2482,14 @@ admin_access_status() {
   else
     ok "Public IP:${ADMIN_HTTP_PORT}: not listening"
   fi
+
+  public_code="$(admin_public_ip_http_code)"
+  case "$public_code" in
+    000) ok "curl public IP:${ADMIN_HTTP_PORT}: refused/timeout" ;;
+    skipped) warn "curl public IP:${ADMIN_HTTP_PORT}: skipped, public IP не определён" ;;
+    curl-missing) warn "curl public IP:${ADMIN_HTTP_PORT}: curl не найден" ;;
+    *) fail "curl public IP:${ADMIN_HTTP_PORT}: HTTP $public_code" ;;
+  esac
 
   if admin_mikrotik_dns_generated; then
     ok "MikroTik DNS static: ${ADMIN_ACCESS_HOST} -> ${VPN_SERVER_IP} есть в generated .rsc"
@@ -2342,14 +2505,27 @@ admin_enable_lan_access() {
   echo "Enable SVNET Admin Panel access from home network"
   echo
   info "Admin Panel не будет открыт на public IP. Nginx должен слушать только ${VPN_SERVER_IP}:${ADMIN_HTTP_PORT}."
+  admin_warn_http_publish_listener
 
   admin_check_openvpn_ready || return 1
   admin_check_containers_running || return 1
   admin_ensure_nginx || return 1
-  admin_disable_nginx_default_site || return 1
+  admin_disable_nginx_default_sites || return 1
   admin_write_nginx_config || return 1
-  admin_reload_nginx || return 1
-  admin_firewall_add_lan_rule || return 1
+  if ! admin_reload_nginx_secure; then
+    admin_rollback_nginx_admin_access
+    return 1
+  fi
+
+  if ! admin_verify_lan_access; then
+    admin_rollback_nginx_admin_access
+    return 1
+  fi
+
+  admin_firewall_add_lan_rule || {
+    admin_rollback_nginx_admin_access
+    return 1
+  }
 
   info "Обновляю MikroTik .rsc, чтобы добавить DNS ${ADMIN_ACCESS_HOST} -> ${VPN_SERVER_IP}."
   generate_mikrotik_configs || return 1
@@ -2357,9 +2533,25 @@ admin_enable_lan_access() {
 
   echo
   admin_verify_lan_access || return 1
+  admin_warn_http_publish_listener
   echo
   ok "Admin Panel доступна из домашней сети: $(admin_lan_url)"
   ok "Developer local access сохранён: $(admin_frontend_url)"
+}
+
+admin_rollback_nginx_admin_access() {
+  warn "Rollback: отключаю nginx admin access, потому что bind проверка не прошла."
+  rm -f "$ADMIN_NGINX_ENABLED" 2>/dev/null || true
+  if command_exists nginx; then
+    if nginx -t >/dev/null 2>&1; then
+      if command_exists systemctl && admin_nginx_active; then
+        systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+      else
+        nginx -s reload >/dev/null 2>&1 || true
+      fi
+    fi
+  fi
+  admin_firewall_remove_lan_rule || true
 }
 
 admin_disable_lan_access() {
@@ -2376,7 +2568,10 @@ admin_disable_lan_access() {
     ok "nginx site already disabled"
   fi
 
+  admin_move_nginx_default_sites svnet-only || return 1
+
   if command_exists nginx; then
+    admin_nginx_bind_preflight || return 1
     nginx -t || return 1
     if command_exists systemctl && admin_nginx_active; then
       systemctl reload nginx || systemctl restart nginx || return 1
@@ -2389,6 +2584,32 @@ admin_disable_lan_access() {
   ok "Admin containers не остановлены. Local access сохранён: $(admin_frontend_url)"
   echo
   admin_access_status
+}
+
+admin_fix_nginx_bind() {
+  require_root || return 1
+  load_config
+
+  echo "Fix SVNET Admin Panel nginx bind"
+  echo
+
+  admin_check_openvpn_ready || return 1
+  admin_ensure_nginx || return 1
+  admin_warn_http_publish_listener
+  admin_move_nginx_default_sites all || return 1
+  admin_write_nginx_config || return 1
+
+  if ! admin_reload_nginx_secure; then
+    admin_rollback_nginx_admin_access
+    return 1
+  fi
+
+  if ! admin_verify_lan_access; then
+    admin_rollback_nginx_admin_access
+    return 1
+  fi
+
+  ok "nginx слушает только безопасный VPN bind для Admin Panel."
 }
 
 admin_container_state() {
@@ -2688,6 +2909,7 @@ admin_access_menu() {
     menu_item "1" "Проверить доступ" "Показать режим, локальные URL, nginx, порт 80, public bind и DNS для svnet.local."
     menu_item "2" "Включить доступ из домашней сети" "Открыть Admin Panel через VPN как http://svnet.local, без public IP."
     menu_item "3" "Отключить доступ из домашней сети" "Убрать nginx site и firewall rule, но оставить локальные admin containers."
+    menu_item "4" "Починить nginx bind" "Аварийно убрать default* из sites-enabled и оставить только 10.88.0.1:80."
     menu_item "0" "Назад" "Вернуться в меню GUI Admin Panel."
     echo
     read -r -p "Выберите пункт: " choice || return 0
@@ -2695,6 +2917,7 @@ admin_access_menu() {
       1) admin_access_status; pause ;;
       2) admin_enable_lan_access; pause ;;
       3) admin_disable_lan_access; pause ;;
+      4) admin_fix_nginx_bind; pause ;;
       0) return 0 ;;
       *) warn "Неверный пункт."; sleep 1 ;;
     esac
@@ -3474,6 +3697,8 @@ Usage:
                            enable Admin Panel on http://svnet.local via VPN only
   svnet --admin-disable-lan-access
                            disable Admin Panel VPN-LAN access, keep local containers
+  svnet --admin-fix-nginx-bind
+                           emergency fix for nginx wildcard/public :80 bind
   svnet --repair-git-repo
                            rebuild /opt/svobodanet/repo as Git repository
   svnet --help         show this help
@@ -3553,6 +3778,9 @@ main() {
       ;;
     --admin-disable-lan-access)
       admin_disable_lan_access
+      ;;
+    --admin-fix-nginx-bind)
+      admin_fix_nginx_bind
       ;;
     --repair-git-repo)
       repair_git_repo

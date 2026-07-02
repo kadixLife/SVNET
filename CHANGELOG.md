@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 1.1.0-alpha.5 - 2026-07-02
+
+- Исправлен критичный security bug Admin Panel LAN access: `default*` nginx sites больше не переименовываются внутри `/etc/nginx/sites-enabled`, а переносятся в `/etc/nginx/svnet-disabled/`.
+- Перед reload nginx добавлена проверка `nginx -T`, которая блокирует `listen 80`, `listen 0.0.0.0:80`, `listen [::]:80`, `listen *:80` и `default_server`-style wildcard HTTP.
+- После reload `--admin-enable-lan-access` проверяет `ss`, `curl http://10.88.0.1` и `curl http://PUBLIC_IP`; при wildcard/public listener выполняется rollback nginx admin access.
+- Добавлена emergency-команда `svnet --admin-fix-nginx-bind` для удаления старых `default*` из `sites-enabled`, пересоздания `svnet-admin.conf` и проверки безопасного bind.
+- `--admin-access-status` теперь явно показывает insecure wildcard binding, если `10.88.0.1` отвечает через `0.0.0.0:80`, и отдельно проверяет public IP curl.
+- `--admin-enable-lan-access` предупреждает, если старый HTTP publish на `8088` всё ещё слушает, потому что Admin LAN access от него не зависит.
+
 ## 1.1.0-alpha.4 - 2026-07-02
 
 - Добавлены режимы доступа Admin Panel: `local-only` по умолчанию, `vpn-lan` для домашней сети через OpenVPN tunnel и зарезервированный `public-https` как будущий отключённый режим.

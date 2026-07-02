@@ -150,7 +150,7 @@ sudo svnet --publish-off
 
 ## GUI Admin Panel
 
-Начиная с `v1.1.0-alpha.4` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log, first-run setup wizard и безопасный wrapper вокруг `svnet`.
+Начиная с `v1.1.0-alpha.5` в репозитории есть отдельный MVP-модуль `admin/`: Next.js frontend, Fastify backend, PostgreSQL action log, first-run setup wizard и безопасный wrapper вокруг `svnet`.
 
 ```bash
 sudo svnet --admin-install
@@ -175,6 +175,12 @@ http://svnet.local
 ```
 
 Команда включает nginx reverse proxy только на `10.88.0.1:80`, добавляет firewall allow rule только для `tun-svnet`/VPN и добавляет DNS static `svnet.local -> 10.88.0.1` в генерируемые MikroTik `.rsc`. Public IP не должен слушать TCP `80`.
+
+Если после старой alpha-версии nginx уже слушает `0.0.0.0:80` или `[::]:80`, выполните emergency-fix:
+
+```bash
+sudo svnet --admin-fix-nginx-bind
+```
 
 Отключить домашний доступ, не останавливая контейнеры:
 

@@ -1,4 +1,4 @@
-# SVNET Admin Panel v1.1.0-alpha.4
+# SVNET Admin Panel v1.1.0-alpha.5
 
 Первый MVP веб-панели для СвободаNET. Модуль живёт отдельно от стабильного CLI и вызывает только allowlist-команды `svnet`.
 
@@ -62,6 +62,12 @@ http://svnet.local
 sudo svnet --admin-disable-lan-access
 ```
 
+Аварийно исправить nginx bind, если после старой alpha-версии остался `0.0.0.0:80` или `[::]:80`:
+
+```bash
+sudo svnet --admin-fix-nginx-bind
+```
+
 SSH tunnel остаётся только developer fallback:
 
 ```bash
@@ -78,6 +84,7 @@ ssh -L 3000:127.0.0.1:3000 root@SERVER_IP
 - `.env` не хранится в Git и должен иметь права `600`.
 - Admin Panel не открывается на `0.0.0.0` по умолчанию.
 - Доступ из домашней сети работает только через nginx на `10.88.0.1:80` и firewall rule для `tun-svnet`.
+- `default*` nginx sites должны быть вне `/etc/nginx/sites-enabled`, если они открывают wildcard/public TCP `80`.
 
 ## Что пока read-only
 
