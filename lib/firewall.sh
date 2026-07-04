@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-setup_svnet_firewall() {
+setup_mikrotik_vpn_firewall() {
   load_installed_config
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
-  printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-svnet.conf
+  printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-mikrotik-vpn.conf
 
   iptables -C INPUT -i "$OVPN_IF" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i "$OVPN_IF" -j ACCEPT
   iptables -C INPUT -p "$OVPN_PROTO" --dport "$OVPN_PORT" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p "$OVPN_PROTO" --dport "$OVPN_PORT" -j ACCEPT

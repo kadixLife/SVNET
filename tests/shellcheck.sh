@@ -8,7 +8,7 @@ if ! command -v shellcheck >/dev/null 2>&1; then
   exit 0
 fi
 
-find "$ROOT_DIR" -type f \( -name '*.sh' -o -name 'svnet' \) \
+find "$ROOT_DIR" -type f \( -name '*.sh' -o -name 'mikrotik-vpn' -o -name 'svnet' \) \
   ! -path '*/.git/*' \
   ! -path '*/output/*' \
   ! -path '*/backups/*' -print0 |

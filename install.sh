@@ -2,166 +2,179 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/common.sh"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/detect.sh"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/backup.sh"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/lists.sh"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/openvpn.sh"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/firewall.sh"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/http-publish.sh"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/mikrotik.sh"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/upgrade.sh"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/gui-placeholder.sh"
+BASE_DIR="/opt/mikrotik-vpn"
+REPO_DIR="/opt/mikrotik-vpn/repo"
+CLI="/usr/local/bin/mikrotik-vpn"
+ALIAS_CLI="/usr/local/bin/svnet"
+GIT_URL="${MIKROTIK_VPN_GIT_URL:-https://github.com/kadixLife/SVNET.git}"
+
+if [[ -t 1 ]]; then
+  RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'; RESET=$'\033[0m'
+else
+  RED=""; GREEN=""; YELLOW=""; BLUE=""; RESET=""
+fi
+
+ok() { printf '%s[OK]%s %s\n' "$GREEN" "$RESET" "$*"; }
+warn() { printf '%s[WARN]%s %s\n' "$YELLOW" "$RESET" "$*"; }
+fail() { printf '%s[FAIL]%s %s\n' "$RED" "$RESET" "$*"; }
+info() { printf '%s[INFO]%s %s\n' "$BLUE" "$RESET" "$*"; }
 
 usage() {
   cat <<'TEXT'
 Usage:
   sudo ./install.sh
-  sudo ./install.sh --safe-upgrade
   sudo ./install.sh --fresh
+  sudo ./install.sh --safe-upgrade
+
+Installs MikroTik_VPN CLI-only manager and starts OpenVPN setup.
 TEXT
 }
 
-collect_config() {
-  load_defaults
+confirm() {
+  local prompt="$1" answe
+  read -r -p "$prompt [y/N] " answer || return 1
+  [[ "$answer" == "y" || "$answer" == "Y" || "$answer" == "yes" || "$answer" == "YES" ]]
+}
 
-  SERVER_IP="${SERVER_IP:-$(detect_public_ip)}"
-  WAN_IF="${WAN_IF:-$(detect_wan_if)}"
+require_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    fail "Запустите от root: sudo ./install.sh"
+    exit 1
+  fi
+}
 
-  echo
-  echo "Найдены параметры установки:"
-  print_detected_values
-  echo
+supported_os() {
+  [[ -r /etc/os-release ]] || return 1
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [[ "${ID:-}" == "ubuntu" && ( "${VERSION_ID:-}" == "22.04" || "${VERSION_ID:-}" == "24.04" ) ]]
+}
 
-  if confirm "Изменить параметры перед установкой?"; then
-    SERVER_IP="$(prompt_value SERVER_IP "$SERVER_IP")"
-    WAN_IF="$(prompt_value WAN_IF "$WAN_IF")"
-    OVPN_PROTO="$(prompt_value OVPN_PROTO "$OVPN_PROTO")"
-    OVPN_PORT="$(prompt_value OVPN_PORT "$OVPN_PORT")"
-    VPN_NET="$(prompt_value VPN_NET "$VPN_NET")"
-    VPN_SERVER_IP="$(prompt_value VPN_SERVER_IP "$VPN_SERVER_IP")"
-    MIKROTIK_VPN_IP="$(prompt_value MIKROTIK_VPN_IP "$MIKROTIK_VPN_IP")"
-    HTTP_PORT="$(prompt_value HTTP_PORT "$HTTP_PORT")"
-    MIKROTIK_LAN="$(prompt_value MIKROTIK_LAN "$MIKROTIK_LAN")"
-    MIKROTIK_LAN_DNS="$(prompt_value MIKROTIK_LAN_DNS "$MIKROTIK_LAN_DNS")"
-    MIKROTIK_WAN="$(prompt_value MIKROTIK_WAN "$MIKROTIK_WAN")"
-    MIKROTIK_OVPN_IF="$(prompt_value MIKROTIK_OVPN_IF "$MIKROTIK_OVPN_IF")"
+repo_dir_has_entries() {
+  [[ -d "$1" ]] && find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .
+}
+
+backup_nogit_repo_dir() {
+  local ts backup
+  ts="$(date +%Y-%m-%d_%H-%M-%S)"
+  backup="${REPO_DIR}.nogit.backup_${ts}"
+  mv "$REPO_DIR" "$backup"
+  warn "Repo folder exists, but it is not a Git repository."
+  warn "Старый repo перенесён в: $backup"
+}
+
+clone_repo() {
+  command -v git >/dev/null 2>&1 || {
+    fail "git не найден. Установите git и повторите установку."
+    return 1
+  }
+  mkdir -p "$(dirname "$REPO_DIR")"
+  git clone "$GIT_URL" "$REPO_DIR"
+}
+
+sync_source_repo() {
+  mkdir -p "$(dirname "$REPO_DIR")"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete \
+      --exclude 'output' \
+      --exclude 'backups' \
+      "$ROOT_DIR/" "$REPO_DIR/"
+  else
+    mkdir -p "$REPO_DIR"
+    tar --exclude='output' --exclude='backups' -C "$ROOT_DIR" -cf - . | tar -C "$REPO_DIR" -xf -
+  fi
+}
+
+prepare_repo_dir() {
+  if [[ -d "$REPO_DIR/.git" ]]; then
+    if command -v git >/dev/null 2>&1; then
+      git -C "$REPO_DIR" fetch origin || return 1
+      git -C "$REPO_DIR" pull --ff-only origin main || return 1
+    fi
+    return 0
   fi
 
-  mkdirs
-  write_config_file "$CONFIG_DIR/svnet.conf"
-  ok "Конфиг сохранён: $CONFIG_DIR/svnet.conf"
+  if [[ -e "$REPO_DIR" ]]; then
+    if repo_dir_has_entries "$REPO_DIR"; then
+      backup_nogit_repo_di
+      clone_repo
+      return $?
+    fi
+    rmdir "$REPO_DIR" 2>/dev/null || {
+      backup_nogit_repo_di
+      clone_repo
+      return $?
+    }
+  fi
+
+  if [[ -d "$ROOT_DIR/.git" ]]; then
+    sync_source_repo
+  else
+    clone_repo
+  fi
+
+  if [[ ! -d "$REPO_DIR/.git" ]]; then
+    fail "$REPO_DIR создан без .git. Update-система зависит от Git."
+    return 1
+  fi
 }
 
-preflight() {
-  require_root || return 1
-  supported_os || {
-    fail "Поддерживаются Ubuntu 22.04 и 24.04."
-    return 1
-  }
-  check_internet || {
-    fail "Нет доступа в интернет. Fresh install не сможет поставить пакеты."
-    return 1
-  }
+install_cli() {
+  install -m 0755 "$REPO_DIR/mikrotik-vpn" "$CLI" || return 1
+  cat > "$ALIAS_CLI" <<'ALIAS'
+#!/usr/bin/env bash
+exec /usr/local/bin/mikrotik-vpn "$@"
+ALIAS
+  chmod 0755 "$ALIAS_CLI"
+  ok "CLI установлен: $CLI"
+  ok "Compatibility alias установлен: $ALIAS_CLI"
 }
 
-fresh_install() {
-  preflight || return 1
-  collect_config
-
-  port_is_free "$OVPN_PROTO" "$OVPN_PORT" || {
-    fail "OpenVPN port $OVPN_PROTO/$OVPN_PORT занят."
-    return 1
-  }
-  port_is_free tcp "$HTTP_PORT" || {
-    fail "HTTP port tcp/$HTTP_PORT занят."
-    return 1
-  }
-
-  echo
-  echo "СвободаNET не найден. Это чистый сервер."
-  confirm "Установить СвободаNET с нуля?" || {
-    info "Установка отменена."
-    return 0
-  }
-
-  install_server_packages
-  install_repo_files
-  install_default_lists
-  setup_easyrsa_and_openvpn
-  setup_svnet_firewall
-  setup_http_publish
-  generate_mikrotik_ovpn
-  setup_gui_placeholder
-  run_migrations
-  prepare_mikrotik_from_repo
-
-  ok "СвободаNET установлен."
-  echo
-  echo "Команда для MikroTik:"
-  print_mikrotik_command
-  echo
-  confirm "Перейти в основное меню svnet?" && /usr/local/bin/svnet
-}
-
-safe_upgrade() {
-  require_root || return 1
-  load_installed_config
-
-  echo "Найдена существующая установка СвободаNET."
-  echo "Режим: Safe Upgrade."
-  confirm "Обновить проект без переустановки OpenVPN и без сброса настроек?" || {
-    info "Safe Upgrade отменён."
-    return 0
-  }
-
-  create_svnet_backup "pre-upgrade"
-  mkdirs
-  install_repo_files
-  install_default_lists
-  run_migrations
-  setup_gui_placeholder
-  prepare_mikrotik_from_repo
-
-  /usr/local/bin/svnet --status || true
-  ok "Safe Upgrade завершён. OpenVPN не переустанавливался."
-  confirm "Перейти в основное меню svnet?" && /usr/local/bin/svnet
+detect_existing_install() {
+  [[ -f /opt/mikrotik-vpn/config/mikrotik-vpn.conf ]] && return 0
+  [[ -f /etc/openvpn/server/mikrotik-vpn.conf ]] && return 0
+  [[ -x "$CLI" ]] && return 0
+  return 1
 }
 
 main() {
   case "${1:-}" in
     --help|-h)
       usage
+      exit 0
       ;;
-    --fresh)
-      fresh_install
-      ;;
-    --safe-upgrade)
-      safe_upgrade
-      ;;
-    "")
-      if existing_install_detected; then
-        safe_upgrade
-      else
-        fresh_install
-      fi
+    ""|--fresh|--safe-upgrade)
       ;;
     *)
       fail "Неизвестный аргумент: $1"
       usage
-      return 2
+      exit 2
       ;;
   esac
+
+  require_root
+  supported_os || {
+    fail "Поддерживаются Ubuntu 22.04 и 24.04."
+    exit 1
+  }
+
+  if detect_existing_install; then
+    echo "Найдена существующая установка MikroTik VPN."
+    confirm "Обновить CLI/repo и открыть установку без destructive reinstall?" || {
+      info "Установка отменена."
+      exit 0
+    }
+  else
+    echo "MikroTik VPN не найден. Это чистый сервер."
+    confirm "Установить MikroTik VPN с нуля?" || {
+      info "Установка отменена."
+      exit 0
+    }
+  fi
+
+  prepare_repo_dir || exit 1
+  install_cli || exit 1
+  "$CLI" --install
 }
 
 main "$@"

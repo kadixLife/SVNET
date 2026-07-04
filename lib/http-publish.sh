@@ -2,11 +2,20 @@
 
 setup_http_publish() {
   load_installed_config
-  mkdir -p "$OUTPUT_DIR"
-  render_template "$SVNET_REPO_ROOT/templates/systemd/svnet-http.service.tpl" /etc/systemd/system/svnet-http.service \
-    HTTP_PORT "$HTTP_PORT" OUTPUT_DIR "$OUTPUT_DIR"
+  cat > /etc/systemd/system/mikrotik-vpn-http.service <<SERVICE
+[Unit]
+Description=MikroTik VPN temporary config HTTP serve
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server $HTTP_PORT --bind 0.0.0.0 --directory $OUTPUT_DIR
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
   systemctl daemon-reload
-  systemctl disable svnet-http.service >/dev/null 2>&1 || true
-  systemctl start svnet-http.service
-  ok "HTTP publish включён: http://$SERVER_IP:$HTTP_PORT/"
+  systemctl disable mikrotik-vpn-http.service >/dev/null 2>&1 || true
+  ok "HTTP publish service подготовлен, но не включён по умолчанию."
 }

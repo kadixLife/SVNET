@@ -1,24 +1,27 @@
-# Обновление
+# Update
 
-## Через менеджер
-
-```bash
-sudo svnet --update
-```
-
-## Через репозиторий
+Проверить обновления:
 
 ```bash
-cd /opt/svobodanet/repo
-sudo ./update.sh
+sudo mikrotik-vpn --check-updates
 ```
 
-Updater проверяет Git upstream, выполняет `git fetch`, сравнивает `VERSION`, показывает `CHANGELOG.md`, спрашивает подтверждение, создаёт `pre-upgrade` backup, применяет fast-forward update, запускает миграции и проверяет статус.
-
-Если установка не из Git, скачайте новую версию репозитория и выполните:
+Dry-run:
 
 ```bash
-sudo ./install.sh
+sudo mikrotik-vpn --update-dry-run
 ```
 
-Installer увидит существующую установку и предложит Safe Upgrade.
+Обновить:
+
+```bash
+sudo mikrotik-vpn --update
+```
+
+Safe update делает backup, проверяет локальные изменения, применяет только fast-forward, запускает bash syntax test и обновляет `/usr/local/bin/mikrotik-vpn`.
+
+Если repo повреждён:
+
+```bash
+sudo mikrotik-vpn --repair-git-repo
+```

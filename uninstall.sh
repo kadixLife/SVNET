@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/common.sh"
-# shellcheck disable=SC1091
-source "$ROOT_DIR/lib/backup.sh"
+BASE_DIR="/opt/mikrotik-vpn"
+CLI="/usr/local/bin/mikrotik-vpn"
+ALIAS_CLI="/usr/local/bin/svnet"
+HTTP_SERVICE="mikrotik-vpn-http.service"
+OVPN_SERVICE="openvpn-server@mikrotik-vpn"
 
 usage() {
   cat <<'TEXT'
 Usage:
   sudo ./uninstall.sh
 
-Удаляет менеджер и HTTP publish только после backup и явных подтверждений.
+Stops temporary publish and optionally removes MikroTik_VPN files after backup.
 TEXT
+}
+
+confirm() {
+  local prompt="$1" answe
+  read -r -p "$prompt [y/N] " answer || return 1
+  [[ "$answer" == "y" || "$answer" == "Y" || "$answer" == "yes" || "$answer" == "YES" ]]
 }
 
 case "${1:-}" in
@@ -24,47 +30,55 @@ case "${1:-}" in
   "")
     ;;
   *)
-    fail "Неизвестный аргумент: $1"
+    echo "[FAIL] Неизвестный аргумент: $1"
     usage
     exit 2
     ;;
 esac
 
-require_root || exit 1
-load_installed_config
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  echo "[FAIL] Запустите от root: sudo ./uninstall.sh"
+  exit 1
+fi
 
-cat <<'TEXT'
-Uninstall удалит менеджер СвободаNET и systemd HTTP publish.
-OpenVPN ключи, сертификаты и /opt/svobodanet можно оставить на месте.
-iptables не очищаются и iptables -F не выполняется.
+cat <<TEXT
+Uninstall MikroTik_VPN.
+
+По умолчанию команда:
+- остановит temporary HTTP publish;
+- предложит остановить OpenVPN;
+- предложит удалить CLI;
+- не удалит $BASE_DIR без отдельного подтверждения.
 TEXT
 
-confirm "Создать backup и продолжить uninstall?" || {
-  info "Uninstall отменён."
-  exit 0
-}
-
-create_svnet_backup "pre-uninstall"
-
-if confirm "Остановить svnet-http.service?"; then
-  systemctl disable --now svnet-http.service >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/svnet-http.service
-  systemctl daemon-reload
+if [[ -x "$CLI" ]]; then
+  "$CLI" --backup || true
 fi
 
-if confirm "Удалить /usr/local/bin/svnet?"; then
-  rm -f /usr/local/bin/svnet
+if confirm "Остановить $HTTP_SERVICE?"; then
+  systemctl disable --now "$HTTP_SERVICE" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$HTTP_SERVICE"
+  systemctl daemon-reload >/dev/null 2>&1 || true
 fi
 
-if confirm "Удалить /opt/svobodanet полностью? Это удалит config/lists/output/backups."; then
+if confirm "Остановить $OVPN_SERVICE?"; then
+  systemctl disable --now "$OVPN_SERVICE" >/dev/null 2>&1 || true
+fi
+
+if confirm "Удалить CLI $CLI и alias $ALIAS_CLI?"; then
+  rm -f "$CLI" "$ALIAS_CLI"
+fi
+
+if confirm "Удалить $BASE_DIR полностью? Это удалит config/lists/output/backups/repo."; then
   read -r -p "Введите DELETE для подтверждения: " answer || answer=""
   if [[ "$answer" == "DELETE" ]]; then
-    rm -rf /opt/svobodanet
+    rm -rf "$BASE_DIR"
+    echo "[OK] $BASE_DIR удалён."
   else
-    warn "/opt/svobodanet оставлен на месте."
+    echo "[WARN] $BASE_DIR оставлен на месте."
   fi
 else
-  warn "/opt/svobodanet оставлен на месте."
+  echo "[WARN] $BASE_DIR оставлен на месте."
 fi
 
-ok "Uninstall завершён."
+echo "[OK] Uninstall завершён."

@@ -5,7 +5,7 @@ remote {{SERVER_IP}} {{OVPN_PORT}}
 nobind
 persist-key
 persist-tun
-remote-cert-tls server
+remote-cert-tls serve
 cipher AES-128-GCM
 auth SHA256
 auth-nocache

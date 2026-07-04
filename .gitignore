@@ -1,7 +1,7 @@
 /backup/
 /backups/
 /output/
-/config/svnet.conf
+/config/mikrotik-vpn.conf
 *.key
 *.pem
 *.p12

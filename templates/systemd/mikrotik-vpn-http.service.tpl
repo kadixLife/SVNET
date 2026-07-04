@@ -1,5 +1,5 @@
 [Unit]
-Description=SvobodaNET config HTTP server
+Description=MikroTik VPN temporary config HTTP serve
 After=network.target
 
 [Service]

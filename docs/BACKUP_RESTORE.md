@@ -1,28 +1,25 @@
 # Backup / Restore
 
-## Создать backup
+Создать backup:
 
 ```bash
-sudo svnet --backup
+sudo mikrotik-vpn --backup
 ```
 
-или через меню:
+Восстановить:
 
-```text
-6) Backup / Restore
-1) Создать backup
+```bash
+sudo mikrotik-vpn --restore
 ```
 
-## Что сохраняется
+Backup сохраняет:
 
-- `/opt/svobodanet/config`
-- `/opt/svobodanet/lists`
-- `/opt/svobodanet/output`
-- `/etc/openvpn/server/svnet.conf`
-- `/etc/systemd/system/svnet-http.service`
-- `/usr/local/bin/svnet`
-- `iptables-save`
+- `/opt/mikrotik-vpn/config`;
+- `/opt/mikrotik-vpn/lists`;
+- `/opt/mikrotik-vpn/devices`;
+- `/opt/mikrotik-vpn/output`;
+- `/etc/openvpn/server/mikrotik-vpn.conf`;
+- `/etc/systemd/system/mikrotik-vpn-http.service`;
+- `/usr/local/bin/mikrotik-vpn`.
 
-## Restore
-
-Restore доступен в меню `svnet`. Перед restore создаётся `pre-restore` backup. Восстановление требует явного подтверждения.
+Restore запускается только после подтверждения.

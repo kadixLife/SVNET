@@ -1,31 +1,28 @@
-# Установка
+# Install
 
-## Быстрый старт
+MikroTik_VPN ставится на Ubuntu VPS.
 
 ```bash
 sudo apt update
 sudo apt install -y git
-git clone https://github.com/OWNER/svobodanet.git
-cd svobodanet
+git clone https://github.com/kadixLife/SVNET.git
+cd SVNET
 sudo ./install.sh
 ```
 
-## Что делает installer
+Installer:
 
-1. Проверяет root.
-2. Проверяет Ubuntu 22.04/24.04.
-3. Проверяет интернет.
-4. Определяет public IPv4.
-5. Определяет WAN interface.
-6. Проверяет занятость портов.
-7. Определяет Fresh Install или Safe Upgrade.
-8. Показывает параметры и даёт их изменить.
-9. Сохраняет `/opt/svobodanet/config/svnet.conf`.
+- проверяет root;
+- проверяет Ubuntu 22.04/24.04;
+- сохраняет Git repo в `/opt/mikrotik-vpn/repo`;
+- ставит `/usr/local/bin/mikrotik-vpn`;
+- создаёт временный alias `/usr/local/bin/svnet`;
+- запускает настройку OpenVPN;
+- генерирует MikroTik `.ovpn` и `.rsc`;
+- показывает одну команду для RouterOS Terminal.
 
-## Fresh Install
+Основная команда:
 
-Fresh Install устанавливает пакеты, создаёт EasyRSA PKI, серверный и клиентский сертификат, запускает OpenVPN, настраивает firewall/NAT, HTTP publish и генерирует MikroTik файлы.
-
-## Safe Upgrade
-
-Safe Upgrade создаёт `pre-upgrade` backup, обновляет код, шаблоны и миграции, не пересоздаёт сертификаты и не меняет рабочий port/proto/interface без явного изменения конфига.
+```bash
+sudo mikrotik-vpn
+```
